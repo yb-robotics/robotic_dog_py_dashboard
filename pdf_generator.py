@@ -8,19 +8,26 @@ import io
 import datetime
 import numpy as np
 
-from reportlab.lib.pagesizes import letter, A4
-from reportlab.lib import colors
-from reportlab.platypus import (
-    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak, HRFlowable, KeepTogether
-)
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT, TA_JUSTIFY
+try:
+    from reportlab.lib.pagesizes import letter, A4
+    from reportlab.lib import colors
+    from reportlab.platypus import (
+        SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak, HRFlowable, KeepTogether
+    )
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT, TA_JUSTIFY
+    REPORTLAB_AVAILABLE = True
+except ImportError:
+    REPORTLAB_AVAILABLE = False
 
 
 def generate_quadruped_pdf_report(data: dict) -> bytes:
     """Generate a complete PDF report from quadruped calculation parameters.
     Returns bytes buffer suitable for Streamlit download_button.
     """
+    if not REPORTLAB_AVAILABLE:
+        raise ImportError("reportlab package is required for PDF generation. Please ensure reportlab is in requirements.txt")
+
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(
         buffer,

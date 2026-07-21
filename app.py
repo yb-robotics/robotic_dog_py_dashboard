@@ -785,12 +785,14 @@ pdf_data = {
     'mass_components': _components
 }
 
-pdf_bytes = generate_quadruped_pdf_report(pdf_data)
-
-pdf_button_container.download_button(
-    "📄 Export Engineering PDF Report",
-    data=pdf_bytes,
-    file_name=f"Quadruped_Robot_Engineering_Dossier_{dof_total}DOF.pdf",
-    mime="application/pdf",
-    help="Click to generate and download a complete multi-page PDF engineering calculation dossier to present to your professor, team, or supervisor!"
-)
+try:
+    pdf_bytes = generate_quadruped_pdf_report(pdf_data)
+    pdf_button_container.download_button(
+        "📄 Export Engineering PDF Report",
+        data=pdf_bytes,
+        file_name=f"Quadruped_Robot_Engineering_Dossier_{dof_total}DOF.pdf",
+        mime="application/pdf",
+        help="Click to generate and download a complete multi-page PDF engineering calculation dossier to present to your professor, team, or supervisor!"
+    )
+except Exception as pdf_err:
+    pdf_button_container.warning(f"📄 PDF Exporter: {pdf_err}")
