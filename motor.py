@@ -12,62 +12,27 @@ SERVO_PRESETS = {
     "SG90 / Micro (1.8 kg·cm @ 5V) — Micro (< 0.5 kg robot)": {
         "continuous_nm": 0.09, "peak_nm": 0.18, "rpm": 70,
         "voltage": 5.0, "current_a": 0.8, "avg_current_a": 0.20, "mass_kg": 0.009,
-        "approx_price_inr": 80,
         "notes": "Micro servo for mini/toy quadrupeds (<500g body). Plastic gears.",
     },
     "MG996R (11 kg·cm @ 6V) — Small (< 1.2 kg robot)": {
         "continuous_nm": 0.55, "peak_nm": 1.08, "rpm": 60,
         "voltage": 6.0, "current_a": 2.5, "avg_current_a": 0.50, "mass_kg": 0.055,
-        "approx_price_inr": 200,
         "notes": "Entry hobby servo. Suitable for small quadrupeds up to ~1.2 kg.",
     },
     "DS3218 Digital (20 kg·cm @ 6.8V) — Small/Medium (~1.5 kg)": {
         "continuous_nm": 1.0, "peak_nm": 1.96, "rpm": 55,
         "voltage": 6.8, "current_a": 3.0, "avg_current_a": 0.60, "mass_kg": 0.060,
-        "approx_price_inr": 350,
         "notes": "Popular for small quadrupeds (~1.5 kg, standing height < 200 mm).",
-    },
-    "DS3235 Digital (35 kg·cm @ 7.4V) — Medium (~2.2 kg)": {
-        "continuous_nm": 1.75, "peak_nm": 3.43, "rpm": 50,
-        "voltage": 7.4, "current_a": 3.5, "avg_current_a": 0.75, "mass_kg": 0.065,
-        "approx_price_inr": 650,
-        "notes": "High torque digital servo. Good for medium quadrupeds up to ~2.2 kg.",
-    },
-    "DS5160 Digital (60 kg·cm @ 8.4V) — Large (~3.5 kg)": {
-        "continuous_nm": 3.0, "peak_nm": 5.88, "rpm": 50,
-        "voltage": 8.4, "current_a": 5.0, "avg_current_a": 1.20, "mass_kg": 0.160,
-        "approx_price_inr": 900,
-        "notes": "Heavy-duty 1/5 scale servo. Can power larger quadrupeds (3-4 kg).",
     },
     "LewanSoul LX-224HV Bus (24 kg·cm @ 7.4V)": {
         "continuous_nm": 1.2, "peak_nm": 2.35, "rpm": 62,
         "voltage": 7.4, "current_a": 2.8, "avg_current_a": 0.55, "mass_kg": 0.060,
-        "approx_price_inr": 800,
         "notes": "Serial bus servo with position/temp feedback.",
     },
     "Dynamixel XL430-W250 (1.4 Nm @ 12V)": {
         "continuous_nm": 1.0, "peak_nm": 1.4, "rpm": 57,
         "voltage": 12.0, "current_a": 1.5, "avg_current_a": 0.40, "mass_kg": 0.058,
-        "approx_price_inr": 15000,
         "notes": "Smart actuator with encoder feedback for research platforms.",
-    },
-    "Dynamixel XM430-W350 (3.8 Nm @ 12V)": {
-        "continuous_nm": 2.7, "peak_nm": 3.8, "rpm": 46,
-        "voltage": 12.0, "current_a": 2.3, "avg_current_a": 0.70, "mass_kg": 0.082,
-        "approx_price_inr": 22000,
-        "notes": "High-performance smart actuator for research quadrupeds.",
-    },
-    "CyberGear QDD Motor (12 Nm peak @ 24V) — Research (~6 kg)": {
-        "continuous_nm": 4.0, "peak_nm": 12.0, "rpm": 300,
-        "voltage": 24.0, "current_a": 10.0, "avg_current_a": 2.50, "mass_kg": 0.350,
-        "approx_price_inr": 35000,
-        "notes": "Quasi-direct drive motor (Xiaomi). Ideal for dynamic walking/trotting.",
-    },
-    "Unitree Go1 QDD Motor (23.7 Nm peak @ 24V) — Research (>8 kg)": {
-        "continuous_nm": 8.0, "peak_nm": 23.7, "rpm": 300,
-        "voltage": 24.0, "current_a": 15.0, "avg_current_a": 4.00, "mass_kg": 0.520,
-        "approx_price_inr": 50000,
-        "notes": "Commercial quadruped QDD motor (Unitree Go1). Dynamic gaits & jumping.",
     },
 }
 

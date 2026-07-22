@@ -34,11 +34,11 @@ from pdf_generator import generate_quadruped_pdf_report
 
 try:
     from optimizer import (optimize_leg_geometry, optimize_leg_proportions_for_motors,
-                           suggest_cheaper_motor_combination)
+                           suggest_lighter_motor_combination)
 except ImportError:
     optimize_leg_geometry = None
     optimize_leg_proportions_for_motors = None
-    suggest_cheaper_motor_combination = None
+    suggest_lighter_motor_combination = None
 
 MM = 1000.0
 G = 9.81
@@ -452,14 +452,13 @@ with tab_actuators:
     knee_cont, knee_peak, knee_rpm, knee_volts, knee_curr = knee_preset["continuous_nm"], knee_preset["peak_nm"], float(knee_preset["rpm"]), knee_preset["voltage"], knee_preset["current_a"]
     knee_avg_curr = knee_preset.get("avg_current_a", knee_curr * 0.25)
     
-    # Calculate preset mass and total cost
+    # Calculate preset mass
     if dof_total == 8:
         preset_motor_mass_total = 4 * hip_preset["mass_kg"] + 4 * knee_preset["mass_kg"]
-        total_motor_cost = 4 * hip_preset.get("approx_price_inr", 350) + 4 * knee_preset.get("approx_price_inr", 350)
     else:
         preset_motor_mass_total = 8 * hip_preset["mass_kg"] + 4 * knee_preset["mass_kg"]
-        total_motor_cost = 8 * hip_preset.get("approx_price_inr", 350) + 4 * knee_preset.get("approx_price_inr", 350)
     st.session_state["mass_motor"] = preset_motor_mass_total
+    total_motor_weight_g = preset_motor_mass_total * 1000
     
     # Display catalog specifications
     st.markdown("##### 📋 Official Datasheet Specifications:")
@@ -470,8 +469,8 @@ with tab_actuators:
         sc3.metric("No-load Rated Speed", f"{hip_rpm:.0f} RPM")
         sc4.metric("Operating Voltage", f"{hip_volts:.1f} V")
         sc5.metric("Stall Current", f"{hip_curr:.1f} A")
-        sc6.metric("Estimated Cost", f"₹{total_motor_cost:,}")
-        st.caption(f"ℹ️ **Total Actuator Mass**: {preset_motor_mass_total*1000:.0f} g for {dof_total} motors.")
+        sc6.metric("Total Motor Mass", f"{total_motor_weight_g:.0f} g")
+        st.caption(f"ℹ️ **Selected Preset**: {hip_preset_name.split(' — ')[0]}.")
     else:
         scc1, scc2, scc3 = st.columns([2.5, 2.5, 1.2])
         with scc1:
@@ -479,7 +478,7 @@ with tab_actuators:
         with scc2:
             st.info(f"**Knee Motor ({knee_preset_name.split(' — ')[0]})**: Peak: {knee_peak:.2f} Nm | Cont: {knee_cont:.2f} Nm | Speed: {knee_rpm:.0f} RPM | Voltage: {knee_volts:.1f}V | Stall: {knee_curr:.1f}A | Weight: {knee_preset['mass_kg']*1000:.0f}g")
         with scc3:
-            st.metric("Total Motor Cost", f"₹{total_motor_cost:,}")
+            st.metric("Total Motor Mass", f"{total_motor_weight_g:.0f} g")
 
     st.divider()
     
@@ -594,26 +593,45 @@ with tab_actuators:
         st.markdown("---")
         st.warning("⚠️ **DESIGN FLAW DETECTED**: Selected motors are insufficient or marginal. Use the Auto-Fix engine to find alternative configurations that pass.")
         if st.button("🔍 Run Auto-Fix: Suggest Passing Motor Combinations"):
-            num_legs = dof_total // 2 if not has_abad else dof_total // 3
-            if num_legs not in [2, 4, 6]: num_legs = 4
+            num_motors_hip = 8 if dof_total == 12 else 4
+            num_motors_knee = 4
+            
+            # Base mass without motors
+            current_motor_weight = (hip_preset["mass_kg"] * num_motors_hip) + (knee_preset["mass_kg"] * num_motors_knee)
+            body_mass_no_motors = robot_mass - current_motor_weight
             
             valid_combos = []
             for hip_name, h_motor in SERVO_PRESETS.items():
                 for knee_name, k_motor in SERVO_PRESETS.items():
-                    req_hip = budget["peak_required"]["hip_nm"]
-                    req_knee = budget["peak_required"]["knee_nm"]
-                    req_hip_cont = budget["continuous_required"]["hip_nm"]
-                    req_knee_cont = budget["continuous_required"]["knee_nm"]
+                    # Calculate candidate motor mass
+                    cand_motor_mass = (h_motor["mass_kg"] * num_motors_hip) + (k_motor["mass_kg"] * num_motors_knee)
+                    cand_total_mass = body_mass_no_motors + cand_motor_mass
                     
-                    h_pass = (h_motor["peak_nm"] >= req_hip and h_motor["continuous_nm"] >= req_hip_cont)
-                    k_pass = (k_motor["peak_nm"] >= req_knee and k_motor["continuous_nm"] >= req_knee_cont)
+                    # Recalculate torque budget for this combination's mass
+                    cand_budget = joint_torque_budget(
+                        hip_flexion=q_hip, knee_flexion=q_knee, hip_abduction=q_ab,
+                        hip_offset=derived["l1"], thigh_length=thigh, shank_length=shank,
+                        total_mass_kg=cand_total_mass, payload_kg=payload_mass,
+                        thigh_mass_kg=thigh_mass, shank_mass_kg=shank_mass,
+                        thigh_com_frac=thigh_com, shank_com_frac=shank_com,
+                        legs_in_stance=stance_legs, dynamic_accel_mps2=dynamic_accel,
+                        impact_factor=impact_factor, transmission_efficiency=efficiency,
+                        safety_factor=safety_factor
+                    )
+                    
+                    req_h = cand_budget["peak_required"]["hip_nm"]
+                    req_k = cand_budget["peak_required"]["knee_nm"]
+                    req_h_cont = cand_budget["continuous_required"]["hip_nm"]
+                    req_k_cont = cand_budget["continuous_required"]["knee_nm"]
+                    
+                    h_pass = (h_motor["peak_nm"] >= req_h and h_motor["continuous_nm"] >= req_h_cont)
+                    k_pass = (k_motor["peak_nm"] >= req_k and k_motor["continuous_nm"] >= req_k_cont)
                     
                     if h_pass and k_pass:
-                        h_margin = (h_motor["peak_nm"] - req_hip) / h_motor["peak_nm"] * 100
-                        k_margin = (k_motor["peak_nm"] - req_knee) / k_motor["peak_nm"] * 100
+                        h_margin = (h_motor["peak_nm"] - req_h) / h_motor["peak_nm"] * 100
+                        k_margin = (k_motor["peak_nm"] - req_k) / k_motor["peak_nm"] * 100
                         avg_margin = (h_margin + k_margin) / 2
-                        total_cost = (h_motor["approx_price_inr"] + k_motor["approx_price_inr"]) * num_legs
-                        total_weight = (h_motor["mass_kg"] + k_motor["mass_kg"]) * num_legs
+                        total_weight = cand_motor_mass
                         
                         valid_combos.append({
                             "hip": hip_name,
@@ -621,39 +639,41 @@ with tab_actuators:
                             "hip_margin": h_margin,
                             "knee_margin": k_margin,
                             "avg_margin": avg_margin,
-                            "cost": total_cost,
                             "weight": total_weight
                         })
             
             if valid_combos:
+                # 1. Best Performance (highest average margin)
                 best_combo = sorted(valid_combos, key=lambda x: x["avg_margin"], reverse=True)[0]
-                better_pool = [c for c in valid_combos if c["hip_margin"] >= 25 and c["knee_margin"] >= 25]
-                better_combo = sorted(better_pool if better_pool else valid_combos, key=lambda x: x["cost"])[0]
-                budget_combo = sorted(valid_combos, key=lambda x: x["cost"])[0]
+                # 2. Balanced (highest margin-to-weight ratio, to optimize payload efficiency)
+                # To avoid division by zero, weight is in kg (typically 0.1 to 1.0 kg)
+                better_combo = sorted(valid_combos, key=lambda x: x["avg_margin"] / max(x["weight"], 0.01), reverse=True)[0]
+                # 3. Lightest Weight (lowest weight combo that passes)
+                budget_combo = sorted(valid_combos, key=lambda x: x["weight"])[0]
                 
                 st.success("🎉 **Feasible Actuator Combinations Found!**")
                 
                 ac1, ac2, ac3 = st.columns(3)
                 with ac1:
-                    st.markdown("🏆 **1. BEST PERFORMANCE**")
+                    st.markdown("🏆 **1. BEST PERFORMANCE** (Highest torque headroom)")
                     st.write(f"• **Hip**: {best_combo['hip'].split(' — ')[0]}")
                     st.write(f"• **Knee**: {best_combo['knee'].split(' — ')[0]}")
                     st.write(f"• **Margins**: Hip: {best_combo['hip_margin']:.0f}% | Knee: {best_combo['knee_margin']:.0f}%")
-                    st.write(f"• **Total Cost**: ₹{best_combo['cost']:,}")
+                    st.write(f"• **Total Motor Weight**: {best_combo['weight']*1000:.0f} g")
                 with ac2:
-                    st.markdown("⚖️ **2. BETTER / BALANCED**")
+                    st.markdown("⚖️ **2. BALANCED CONFIGURATION** (Best power-to-weight ratio)")
                     st.write(f"• **Hip**: {better_combo['hip'].split(' — ')[0]}")
                     st.write(f"• **Knee**: {better_combo['knee'].split(' — ')[0]}")
                     st.write(f"• **Margins**: Hip: {better_combo['hip_margin']:.0f}% | Knee: {better_combo['knee_margin']:.0f}%")
-                    st.write(f"• **Total Cost**: ₹{better_combo['cost']:,}")
+                    st.write(f"• **Total Motor Weight**: {better_combo['weight']*1000:.0f} g")
                 with ac3:
-                    st.markdown("💰 **3. BUDGET / MAINTAINABLE**")
+                    st.markdown("🔋 **3. LIGHTEST WEIGHT** (Easiest swing mechanics)")
                     st.write(f"• **Hip**: {budget_combo['hip'].split(' — ')[0]}")
                     st.write(f"• **Knee**: {budget_combo['knee'].split(' — ')[0]}")
                     st.write(f"• **Margins**: Hip: {budget_combo['hip_margin']:.0f}% | Knee: {budget_combo['knee_margin']:.0f}%")
-                    st.write(f"• **Total Cost**: ₹{budget_combo['cost']:,}")
+                    st.write(f"• **Total Motor Weight**: {budget_combo['weight']*1000:.0f} g")
             else:
-                st.error("⛔ **NO FEASIBLE CONFIGURATIONS**: Even the most powerful motors in the catalog cannot support this robot. Consider reducing payload or chassis mass.")
+                st.error("⛔ **NO FEASIBLE CONFIGURATIONS**: Even the most powerful motors under 30kg torque limit in the catalog cannot support this robot configuration. Consider reducing target standing height, active stance legs, or link/body masses.")
             
     # Motor height recommendation card
     st.markdown("##### 🎯 Standing Height Limits:")
@@ -1013,10 +1033,10 @@ with tab_power_opt:
                 opt_c2.metric("Optimized Knee Utilization", f"{opt_result['knee_utilization_pct']:.0f}%")
                 opt_c3.metric("Torque-Margin Improvement", f"{opt_result.get('improvement_pct', 0):.1f}%")
 
-    if suggest_cheaper_motor_combination is not None:
-        with st.expander("💰 Cost-Saving Motor Downsizing Suggestions"):
-            if st.button("🔍 Find cheaper motor combinations"):
-                suggestions = suggest_cheaper_motor_combination(
+    if suggest_lighter_motor_combination is not None:
+        with st.expander("⚖️ Weight-Saving Motor Downsizing Suggestions"):
+            if st.button("🔍 Find lighter motor combinations"):
+                suggestions = suggest_lighter_motor_combination(
                     standing_height, _total_mass_calc, _payload_mass_ui,
                     thigh_mass, shank_mass, stance_legs,
                     dynamic_accel, impact_factor, efficiency, safety_factor,
@@ -1024,21 +1044,21 @@ with tab_power_opt:
                     hip_preset_name, knee_preset_name, dof_total
                 )
                 if suggestions:
-                    st.success(f"Found **{len(suggestions)}** cheaper motor combination(s) that meet torque requirements!")
-                    cost_rows = []
+                    st.success(f"Found **{len(suggestions)}** lighter motor combination(s) that meet torque requirements!")
+                    weight_rows = []
                     for s in suggestions[:5]:
-                        cost_rows.append({
-                            "Hip Motor": s['hip_motor'],
-                            "Knee Motor": s['knee_motor'],
+                        weight_rows.append({
+                            "Hip Motor": s['hip_motor'].split(' — ')[0],
+                            "Knee Motor": s['knee_motor'].split(' — ')[0],
                             "Femur Fraction": f"{s['femur_fraction']:.0%}",
-                            "Total Motor Cost": f"₹{s['total_motor_cost']:,}",
-                            "Savings": f"₹{s['cost_savings']:,}",
+                            "Total Motor Mass": f"{s['total_motor_weight_kg']*1000:.0f} g",
+                            "Weight Saved": f"{s['weight_savings_g']:.0f} g",
                             "Hip Margin": f"{s['hip_margin_pct']:.0f}%",
                             "Knee Margin": f"{s['knee_margin_pct']:.0f}%"
                         })
-                    st.dataframe(pd.DataFrame(cost_rows), use_container_width=True, hide_index=True)
+                    st.dataframe(pd.DataFrame(weight_rows), use_container_width=True, hide_index=True)
                 else:
-                    st.info("No cheaper motor combination found that meets torque requirements. Your current selection is already cost-optimal.")
+                    st.info("No lighter motor combination found that meets torque requirements. Your current selection is already weight-optimal.")
 
 # =========================================================================================
 # PDF BUILDER DATA DICT AND DOWNLOAD BUTTON

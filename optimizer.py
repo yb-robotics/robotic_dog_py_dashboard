@@ -165,32 +165,37 @@ def optimize_leg_proportions_for_motors(standing_height_m, total_mass_kg, payloa
     }
 
 
-def suggest_cheaper_motor_combination(standing_height_m, total_mass_kg, payload_kg,
-                                       thigh_mass_kg, shank_mass_kg,
-                                       legs_in_stance, dynamic_accel, impact_factor,
-                                       efficiency, safety_factor, has_abad, hip_offset,
-                                       current_hip_preset_name, current_knee_preset_name,
-                                       dof_total=8):
+def suggest_lighter_motor_combination(standing_height_m, total_mass_kg, payload_kg,
+                                      thigh_mass_kg, shank_mass_kg,
+                                      legs_in_stance, dynamic_accel, impact_factor,
+                                      efficiency, safety_factor, has_abad, hip_offset,
+                                      current_hip_preset_name, current_knee_preset_name,
+                                      dof_total=8):
     current_hip = SERVO_PRESETS.get(current_hip_preset_name)
     current_knee = SERVO_PRESETS.get(current_knee_preset_name)
     if not current_hip or not current_knee:
         return []
         
-    num_legs = dof_total // 2 if not has_abad else dof_total // 3
-    if num_legs not in [2, 4, 6]: num_legs = 4
+    num_motors_hip = 8 if dof_total == 12 else 4
+    num_motors_knee = 4
     
-    current_cost = (current_hip["approx_price_inr"] + current_knee["approx_price_inr"]) * num_legs
+    current_weight = current_hip["mass_kg"] * num_motors_hip + current_knee["mass_kg"] * num_motors_knee
+    body_mass_no_motors = total_mass_kg - current_weight
+    
     suggestions = []
     
     for hip_name, hip_motor in SERVO_PRESETS.items():
         for knee_name, knee_motor in SERVO_PRESETS.items():
-            new_cost = (hip_motor["approx_price_inr"] + knee_motor["approx_price_inr"]) * num_legs
-            if new_cost < current_cost:
+            new_weight = hip_motor["mass_kg"] * num_motors_hip + knee_motor["mass_kg"] * num_motors_knee
+            if new_weight < current_weight:
                 # Sweep femur_fraction
                 best_margin = -1e6
                 best_tf = 0.5
                 best_h_margin = 0
                 best_k_margin = 0
+                
+                # Dynamic mass for this candidate combo
+                cand_total_mass = body_mass_no_motors + new_weight
                 
                 for tf in np.linspace(0.35, 0.65, 10):
                     max_ext = standing_height_m / 0.78
@@ -205,7 +210,7 @@ def suggest_cheaper_motor_combination(standing_height_m, total_mass_kg, payload_
                     budget = joint_torque_budget(
                         hip_flexion=qf, knee_flexion=qk, hip_abduction=qa,
                         hip_offset=hip_offset, thigh_length=thigh_length, shank_length=shank_length,
-                        total_mass_kg=total_mass_kg, payload_kg=payload_kg,
+                        total_mass_kg=cand_total_mass, payload_kg=payload_kg,
                         thigh_mass_kg=thigh_mass_kg, shank_mass_kg=shank_mass_kg,
                         thigh_com_frac=0.5, shank_com_frac=0.5,
                         legs_in_stance=legs_in_stance, dynamic_accel_mps2=dynamic_accel,
@@ -232,10 +237,10 @@ def suggest_cheaper_motor_combination(standing_height_m, total_mass_kg, payload_
                         "hip_motor": hip_name,
                         "knee_motor": knee_name,
                         "femur_fraction": best_tf,
-                        "total_motor_cost": new_cost,
-                        "cost_savings": current_cost - new_cost,
+                        "total_motor_weight_kg": new_weight,
+                        "weight_savings_g": (current_weight - new_weight) * 1000,
                         "hip_margin_pct": best_h_margin,
                         "knee_margin_pct": best_k_margin
                     })
                     
-    return sorted(suggestions, key=lambda x: x["cost_savings"], reverse=True)
+    return sorted(suggestions, key=lambda x: x["weight_savings_g"], reverse=True)
