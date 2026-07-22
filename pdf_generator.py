@@ -240,12 +240,23 @@ def generate_quadruped_pdf_report(data: dict) -> bytes:
         ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor("#F9FAFB")]),
     ]))
     elements.append(kin_table)
+    elements.append(Spacer(1, 6))
+
+    # Workspace & Manipulability info
+    manip_val = data.get('manipulability_index', 0.0)
+    elements.append(Paragraph(
+        f"<b>Manipulability Index (w):</b> {manip_val:.4f} &nbsp;&nbsp;|&nbsp;&nbsp; "
+        f"<i>Status: {'Optimal' if manip_val >= 0.01 else 'Singular/Restricted'}</i><br/>"
+        f"The manipulability index measures the leg's ability to move and apply forces in arbitrary directions. "
+        f"Values near zero indicate closeness to a kinematic singularity where joint velocities grow to infinity.",
+        body_style
+    ))
     elements.append(Spacer(1, 10))
 
     # -------------------------------------------------------------------------
-    # SECTION 2: DIFFERENTIAL KINEMATICS & JACOBIAN MATRIX
+    # SECTION 2: DIFFERENTIAL KINEMATICS & DYNAMIC PROPERTIES
     # -------------------------------------------------------------------------
-    elements.append(Paragraph("2. Differential Kinematics & Jacobian Matrix", h1_style))
+    elements.append(Paragraph("2. Differential Kinematics & Dynamic Properties", h1_style))
     elements.append(HRFlowable(width="100%", thickness=1, color=SECONDARY, spaceAfter=6))
 
     elements.append(Paragraph(
@@ -253,27 +264,42 @@ def generate_quadruped_pdf_report(data: dict) -> bytes:
         "&nbsp;&nbsp;<b>v</b> = <b>J(q)</b> * <b>q̇</b><br/>"
         "By virtual work duality, its transpose maps foot ground reaction forces <b>F<sub>ground</sub></b> to joint torques <b>τ</b>:<br/>"
         "&nbsp;&nbsp;<b>τ</b> = <b>J(q)<sup>T</sup></b> * <b>F<sub>ground</sub></b>",
-        equation_style
+        body_style
     ))
 
     j_matrix = data.get('jacobian_matrix', None)
     j_cond = data.get('jacobian_condition', 1.0)
     
-    j_text = "Evaluated 2D Jacobian Matrix J(q):<br/>"
+    j_text = "<b>Evaluated 2D Jacobian Matrix J(q):</b><br/>"
     if j_matrix is not None:
-        j_text += f"[ [ {j_matrix[0][0]:.4f},  {j_matrix[0][1]:.4f} ],<br/>"
-        j_text += f"  [ {j_matrix[1][0]:.4f},  {j_matrix[1][1]:.4f} ] ]"
+        j_text += f"&nbsp;&nbsp;[ [ {j_matrix[0][0]:.4f},  {j_matrix[0][1]:.4f} ],<br/>"
+        j_text += f"&nbsp;&nbsp;  [ {j_matrix[1][0]:.4f},  {j_matrix[1][1]:.4f} ] ]"
     else:
-        j_text += "[ [ dX/dq_hip, dX/dq_knee ], [ dZ/dq_hip, dZ/dq_knee ] ]"
+        j_text += "&nbsp;&nbsp;[ [ dX/dq_hip, dX/dq_knee ], [ dZ/dq_hip, dZ/dq_knee ] ]"
 
     elements.append(Paragraph(j_text, equation_style))
 
     cond_color = SUCCESS_COLOR if j_cond < 20 else WARNING_COLOR
     elements.append(Paragraph(
         f"<b>Jacobian Condition Number c(J):</b> {j_cond:.2f} &nbsp;&nbsp;|&nbsp;&nbsp; "
-        f"<i>Status: {'WELL-CONDITIONED (Far from singularity)' if j_cond < 25 else 'NEAR SINGULARITY (High Joint Velocities Required)'}</i>",
+        f"<i>Status: {'WELL-CONDITIONED' if j_cond < 25 else 'NEAR SINGULARITY (High Joint Velocities Required)'}</i>",
         body_style
     ))
+    
+    # 2-Link Mass Matrix M(q)
+    mass_matrix = data.get('mass_matrix', None)
+    if mass_matrix is not None:
+        elements.append(Paragraph("Joint-Space Mass Matrix M(q):", h2_style))
+        m_text = "<b>Evaluated mass matrix M(q) (Inertia Tensor):</b><br/>"
+        m_text += f"&nbsp;&nbsp;[ [ {mass_matrix[0][0]:.6f},  {mass_matrix[0][1]:.6f} ],<br/>"
+        m_text += f"&nbsp;&nbsp;  [ {mass_matrix[1][0]:.6f},  {mass_matrix[1][1]:.6f} ] ]"
+        elements.append(Paragraph(m_text, equation_style))
+        elements.append(Paragraph(
+            "The mass matrix encapsulates the dynamic coupling and joint-space inertial properties. "
+            "Diagonal elements represent the self-inertia of the Hip and Knee links; off-diagonal elements show "
+            "the Coriolis and acceleration cross-coupling terms.",
+            body_style
+        ))
     elements.append(Spacer(1, 10))
 
     # -------------------------------------------------------------------------
@@ -371,8 +397,122 @@ def generate_quadruped_pdf_report(data: dict) -> bytes:
         ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
         ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor("#F9FAFB")]),
     ]))
+    elements.append(torque_table_pdf)
+    elements.append(Spacer(1, 6))
+
+    # Gait Recommendations Section in PDF
+    gait_recs = data.get('gait_recommendations', [])
+    if gait_recs:
+        elements.append(Paragraph("Gait Sizing & Recommendation Analysis:", h2_style))
+        gait_table_rows = [
+            [
+                Paragraph("Gait Mode", table_header_style),
+                Paragraph("Status", table_header_style),
+                Paragraph("Duty Factor", table_header_style),
+                Paragraph("Hip Margin", table_header_style),
+                Paragraph("Knee Margin", table_header_style),
+                Paragraph("Terrain Suitability", table_header_style)
+            ]
+        ]
+        for gr in gait_recs[:5]:  # Show top 5 gaits
+            status_text = "PASS" if gr['feasible'] else "FAIL"
+            gait_table_rows.append([
+                Paragraph(gr['gait'], table_cell_bold),
+                Paragraph(status_text, table_cell_style),
+                Paragraph(f"{gr['duty_factor']:.2f}", table_cell_style),
+                Paragraph(f"{gr['hip_margin_pct']:.0f}%", table_cell_style),
+                Paragraph(f"{gr['knee_margin_pct']:.0f}%", table_cell_style),
+                Paragraph(gr.get('terrain_suitability', 'N/A'), table_cell_style)
+            ])
+        gait_table = Table(gait_table_rows, colWidths=[100, 50, 75, 80, 80, 140])
+        gait_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), SECONDARY),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#D1D5DB")),
+            ('PADDING', (0, 0), (-1, -1), 4),
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor("#F9FAFB")]),
+        ]))
+        elements.append(gait_table)
+    elements.append(Spacer(1, 10))
+
+    # -------------------------------------------------------------------------
+    # SECTION 4: ACTUATOR SELECTION & DUAL-MOTOR CONFIGURATION
+    # -------------------------------------------------------------------------
+    elements.append(Paragraph("4. Actuator Selection & Torque-Speed Operating Points", h1_style))
+    elements.append(HRFlowable(width="100%", thickness=1, color=SECONDARY, spaceAfter=6))
+
+    motor_mode = data.get('motor_mode', 'same')
+    hip_preset_name = data.get('hip_preset_name', 'DS3218')
+    knee_preset_name = data.get('knee_preset_name', 'DS3218')
+    hip_spec = data.get('hip_spec', {})
+    knee_spec = data.get('knee_spec', {})
+
+    if motor_mode == 'same':
+        elements.append(Paragraph(
+            f"<b>Configuration:</b> Case 1 — Same Motor Model for All Joints (Hip & Knee identical)<br/>"
+            f"<b>Selected Motor:</b> {hip_preset_name}",
+            body_style
+        ))
+    else:
+        elements.append(Paragraph(
+            f"<b>Configuration:</b> Case 2 — Independent Motors per Joint (Custom Hip vs Knee)<br/>"
+            f"<b>Hip Joint Motor:</b> {hip_preset_name}<br/>"
+            f"<b>Knee Joint Motor:</b> {knee_preset_name}",
+            body_style
+        ))
+
+    motor_table_data = [
+        [
+            Paragraph("Joint / Motor", table_header_style),
+            Paragraph("Selected Preset Model", table_header_style),
+            Paragraph("Peak Torque", table_header_style),
+            Paragraph("Continuous Torque", table_header_style),
+            Paragraph("Unit Weight", table_header_style),
+            Paragraph("Verdict", table_header_style)
+        ],
+        [
+            Paragraph("Hip Joint Motor", table_cell_bold),
+            Paragraph(hip_preset_name.split(' — ')[0], table_cell_style),
+            Paragraph(f"{hip_spec.get('peak_nm', 0):.2f} Nm", table_cell_style),
+            Paragraph(f"{hip_spec.get('continuous_nm', 0):.2f} Nm", table_cell_style),
+            Paragraph(f"{hip_spec.get('mass_kg', 0)*1000:.0f} g", table_cell_style),
+            Paragraph(f"<b>{data.get('hip_verdict', 'PASS')}</b>", table_cell_bold)
+        ],
+        [
+            Paragraph("Knee Joint Motor", table_cell_bold),
+            Paragraph(knee_preset_name.split(' — ')[0], table_cell_style),
+            Paragraph(f"{knee_spec.get('peak_nm', 0):.2f} Nm", table_cell_style),
+            Paragraph(f"{knee_spec.get('continuous_nm', 0):.2f} Nm", table_cell_style),
+            Paragraph(f"{knee_spec.get('mass_kg', 0)*1000:.0f} g", table_cell_style),
+            Paragraph(f"<b>{data.get('knee_verdict', 'PASS')}</b>", table_cell_bold)
+        ]
+    ]
+    motor_table = Table(motor_table_data, colWidths=[100, 160, 65, 75, 60, 65])
+    motor_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), PRIMARY),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#D1D5DB")),
+        ('PADDING', (0, 0), (-1, -1), 5),
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor("#F9FAFB")]),
+    ]))
     elements.append(motor_table)
     elements.append(Spacer(1, 6))
+
+    # Motor Operating Points Section in PDF
+    ops = data.get('motor_operating_points', {})
+    if ops:
+        elements.append(Paragraph("Torque-Speed Operating Point Verification:", h2_style))
+        hip_op = ops.get('hip', {})
+        knee_op = ops.get('knee', {})
+        op_text = (
+            f"• <b>Hip Joint:</b> Utilized Speed: <b>{hip_op.get('speed_pct', 0):.0f}%</b> | "
+            f"Utilized Torque: <b>{hip_op.get('torque_pct', 0):.0f}%</b> | "
+            f"Thermal Region: <b>{'Continuous (Safe)' if hip_op.get('in_continuous_region') else 'Intermittent (Caution)'}</b><br/>"
+            f"• <b>Knee Joint:</b> Utilized Speed: <b>{knee_op.get('speed_pct', 0):.0f}%</b> | "
+            f"Utilized Torque: <b>{knee_op.get('torque_pct', 0):.0f}%</b> | "
+            f"Thermal Region: <b>{'Continuous (Safe)' if knee_op.get('in_continuous_region') else 'Intermittent (Caution)'}</b>"
+        )
+        elements.append(Paragraph(op_text, body_style))
 
     elements.append(Paragraph(
         f"<b>🎯 Motor Standing Height Recommendation:</b> The selected motor combination supports a maximum safe standing height "
