@@ -191,6 +191,33 @@ def recommend_gait(*, hip_peak_nm, knee_peak_nm, hip_cont_nm, knee_cont_nm,
         
         feasible = (hip_margin > 0) and (knee_margin > 0)
         
+        # Height sweep to find max safe standing height for this specific gait
+        gait_max_h = None
+        for h_mm in range(50, 1201, 10):
+            h_m = h_mm / 1000.0
+            sol_h = leg_ik(0.0, hip_offset, -h_m, hip_offset, thigh_length, shank_length)
+            if sol_h is None:
+                continue
+            qa_h, qf_h, qk_h = sol_h
+            
+            b_h = joint_torque_budget(
+                hip_flexion=qf_h, knee_flexion=qk_h, hip_abduction=qa_h,
+                hip_offset=hip_offset, thigh_length=thigh_length, shank_length=shank_length,
+                total_mass_kg=robot_mass_kg, payload_kg=payload_kg,
+                thigh_mass_kg=thigh_mass_kg, shank_mass_kg=shank_mass_kg,
+                thigh_com_frac=0.5, shank_com_frac=0.5,
+                legs_in_stance=max(1, min_stance), dynamic_accel_mps2=9.81 if min_stance==0 else 2.0,
+                impact_factor=1.5 if min_stance<2 else 1.1, 
+                transmission_efficiency=efficiency,
+                safety_factor=safety_factor
+            )
+            
+            if (b_h["peak_required"]["hip_nm"] <= hip_peak_nm and 
+                b_h["peak_required"]["knee_nm"] <= knee_peak_nm and
+                b_h["continuous_required"]["hip_nm"] <= hip_cont_nm and 
+                b_h["continuous_required"]["knee_nm"] <= knee_cont_nm):
+                gait_max_h = h_mm
+        
         if gait_name == "Walk": speed_suitability = "Walk for <0.3 m/s"
         elif gait_name == "Amble": speed_suitability = "Amble for 0.3-0.5"
         elif gait_name == "Trot": speed_suitability = "Trot for 0.3-1.0"
@@ -214,6 +241,7 @@ def recommend_gait(*, hip_peak_nm, knee_peak_nm, hip_cont_nm, knee_cont_nm,
             "duty_factor": duty_factor,
             "speed_suitability": speed_suitability,
             "terrain_suitability": terrain_suitability,
+            "max_height_mm": gait_max_h if gait_max_h is not None else 0,
             "recommendation": "Recommended" if feasible else "Not feasible"
         })
         

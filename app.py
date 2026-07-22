@@ -259,6 +259,14 @@ with tab_geom:
     derived = posture_dimensions(dof_total, standing_height, femur_fraction, neutral_knee_deg)
     has_abad = derived["has_abad"]
     
+    # Proportions metrics bar
+    st.markdown("##### 📐 Current Physical Proportions:")
+    pcol_1, pcol_2, pcol_3, pcol_4 = st.columns(4)
+    pcol_1.metric("Target Standing Height", f"{standing_height*MM:.1f} mm")
+    pcol_2.metric("Femur / Thigh Length", f"{derived['l2']*MM:.1f} mm")
+    pcol_3.metric("Shank / Lower Leg", f"{derived['l3']*MM:.1f} mm")
+    pcol_4.metric("Max Extended Leg Length", f"{derived['max_extension']*MM:.1f} mm")
+    
     # Check stair gate height constraints immediately if terrain is stairs
     if terrain == "Small stairs":
         std_riser_m = 0.178
@@ -444,27 +452,34 @@ with tab_actuators:
     knee_cont, knee_peak, knee_rpm, knee_volts, knee_curr = knee_preset["continuous_nm"], knee_preset["peak_nm"], float(knee_preset["rpm"]), knee_preset["voltage"], knee_preset["current_a"]
     knee_avg_curr = knee_preset.get("avg_current_a", knee_curr * 0.25)
     
-    # Calculate preset mass
+    # Calculate preset mass and total cost
     if dof_total == 8:
         preset_motor_mass_total = 4 * hip_preset["mass_kg"] + 4 * knee_preset["mass_kg"]
+        total_motor_cost = 4 * hip_preset.get("approx_price_inr", 350) + 4 * knee_preset.get("approx_price_inr", 350)
     else:
         preset_motor_mass_total = 8 * hip_preset["mass_kg"] + 4 * knee_preset["mass_kg"]
+        total_motor_cost = 8 * hip_preset.get("approx_price_inr", 350) + 4 * knee_preset.get("approx_price_inr", 350)
     st.session_state["mass_motor"] = preset_motor_mass_total
     
     # Display catalog specifications
     st.markdown("##### 📋 Official Datasheet Specifications:")
     if motor_mode == "same":
-        sc1, sc2, sc3, sc4, sc5 = st.columns(5)
+        sc1, sc2, sc3, sc4, sc5, sc6 = st.columns(6)
         sc1.metric("Peak Stall Torque", f"{hip_peak:.2f} Nm")
         sc2.metric("Continuous Torque", f"{hip_cont:.2f} Nm")
         sc3.metric("No-load Rated Speed", f"{hip_rpm:.0f} RPM")
         sc4.metric("Operating Voltage", f"{hip_volts:.1f} V")
         sc5.metric("Stall Current", f"{hip_curr:.1f} A")
+        sc6.metric("Estimated Cost", f"₹{total_motor_cost:,}")
         st.caption(f"ℹ️ **Total Actuator Mass**: {preset_motor_mass_total*1000:.0f} g for {dof_total} motors.")
     else:
-        scc1, scc2 = st.columns(2)
-        scc1.info(f"**Hip Motor ({hip_preset_name.split(' — ')[0]})**: Peak: {hip_peak:.2f} Nm | Cont: {hip_cont:.2f} Nm | Speed: {hip_rpm:.0f} RPM | Voltage: {hip_volts:.1f}V | Stall: {hip_curr:.1f}A | Weight: {hip_preset['mass_kg']*1000:.0f}g")
-        scc2.info(f"**Knee Motor ({knee_preset_name.split(' — ')[0]})**: Peak: {knee_peak:.2f} Nm | Cont: {knee_cont:.2f} Nm | Speed: {knee_rpm:.0f} RPM | Voltage: {knee_volts:.1f}V | Stall: {knee_curr:.1f}A | Weight: {knee_preset['mass_kg']*1000:.0f}g")
+        scc1, scc2, scc3 = st.columns([2.5, 2.5, 1.2])
+        with scc1:
+            st.info(f"**Hip Motor ({hip_preset_name.split(' — ')[0]})**: Peak: {hip_peak:.2f} Nm | Cont: {hip_cont:.2f} Nm | Speed: {hip_rpm:.0f} RPM | Voltage: {hip_volts:.1f}V | Stall: {hip_curr:.1f}A | Weight: {hip_preset['mass_kg']*1000:.0f}g")
+        with scc2:
+            st.info(f"**Knee Motor ({knee_preset_name.split(' — ')[0]})**: Peak: {knee_peak:.2f} Nm | Cont: {knee_cont:.2f} Nm | Speed: {knee_rpm:.0f} RPM | Voltage: {knee_volts:.1f}V | Stall: {knee_curr:.1f}A | Weight: {knee_preset['mass_kg']*1000:.0f}g")
+        with scc3:
+            st.metric("Total Motor Cost", f"₹{total_motor_cost:,}")
 
     st.divider()
     
@@ -491,6 +506,8 @@ with tab_actuators:
         thigh_com = st.slider("Thigh COM (% from hip)", 0, 100, 50) / 100
     with tc4:
         shank_com = st.slider("Shank COM (% from knee)", 0, 100, 50) / 100
+        jerk_mode = st.checkbox("Jerk Mode (1.1x safety)", value=False,
+                                help="Tolerates temporary overload. Reduces safety factor to 1.1x to evaluate if the motor can practically work with some jerks.")
         
     # Recompute total mass for calculations
     motor_mass_total = st.session_state.get("mass_motor", preset_motor_mass_total)
@@ -498,6 +515,10 @@ with tab_actuators:
     frame_mass = st.session_state.get("mass_frame", 0.25)
     links_mass = st.session_state.get("mass_links", 0.15)
     payload_mass = st.session_state.get("mass_payload", 0.0)
+    
+    if jerk_mode:
+        safety_factor = 1.1
+        st.warning("⚠️ Jerk Mode Active: Overriding safety multiplier to 1.1x. Expect structural jitter or joint sag in reality under high loads, but motors will walk.")
     
     esp32_mass, pcb_mass, sensor_mass, wiring_mass, fastener_mass = .02, .03, .03, .04, .03
     robot_mass = motor_mass_total + battery_mass + frame_mass + links_mass + esp32_mass + pcb_mass + sensor_mass + wiring_mass + fastener_mass
@@ -567,6 +588,72 @@ with tab_actuators:
             st.warning(f"⚠️ **Knee Pitch Joint: MARGINAL** — " + " ".join(eval_knee["reasons"]))
         else:
             st.success(f"✅ **Knee Pitch Joint: PASS** — " + " ".join(eval_knee["reasons"]))
+            
+    # Clickable Auto-Fix combination finder
+    if eval_hip['verdict'] in ["FAIL", "MARGINAL"] or eval_knee['verdict'] in ["FAIL", "MARGINAL"]:
+        st.markdown("---")
+        st.warning("⚠️ **DESIGN FLAW DETECTED**: Selected motors are insufficient or marginal. Use the Auto-Fix engine to find alternative configurations that pass.")
+        if st.button("🔍 Run Auto-Fix: Suggest Passing Motor Combinations"):
+            num_legs = dof_total // 2 if not has_abad else dof_total // 3
+            if num_legs not in [2, 4, 6]: num_legs = 4
+            
+            valid_combos = []
+            for hip_name, h_motor in SERVO_PRESETS.items():
+                for knee_name, k_motor in SERVO_PRESETS.items():
+                    req_hip = budget["peak_required"]["hip_nm"]
+                    req_knee = budget["peak_required"]["knee_nm"]
+                    req_hip_cont = budget["continuous_required"]["hip_nm"]
+                    req_knee_cont = budget["continuous_required"]["knee_nm"]
+                    
+                    h_pass = (h_motor["peak_nm"] >= req_hip and h_motor["continuous_nm"] >= req_hip_cont)
+                    k_pass = (k_motor["peak_nm"] >= req_knee and k_motor["continuous_nm"] >= req_knee_cont)
+                    
+                    if h_pass and k_pass:
+                        h_margin = (h_motor["peak_nm"] - req_hip) / h_motor["peak_nm"] * 100
+                        k_margin = (k_motor["peak_nm"] - req_knee) / k_motor["peak_nm"] * 100
+                        avg_margin = (h_margin + k_margin) / 2
+                        total_cost = (h_motor["approx_price_inr"] + k_motor["approx_price_inr"]) * num_legs
+                        total_weight = (h_motor["mass_kg"] + k_motor["mass_kg"]) * num_legs
+                        
+                        valid_combos.append({
+                            "hip": hip_name,
+                            "knee": knee_name,
+                            "hip_margin": h_margin,
+                            "knee_margin": k_margin,
+                            "avg_margin": avg_margin,
+                            "cost": total_cost,
+                            "weight": total_weight
+                        })
+            
+            if valid_combos:
+                best_combo = sorted(valid_combos, key=lambda x: x["avg_margin"], reverse=True)[0]
+                better_pool = [c for c in valid_combos if c["hip_margin"] >= 25 and c["knee_margin"] >= 25]
+                better_combo = sorted(better_pool if better_pool else valid_combos, key=lambda x: x["cost"])[0]
+                budget_combo = sorted(valid_combos, key=lambda x: x["cost"])[0]
+                
+                st.success("🎉 **Feasible Actuator Combinations Found!**")
+                
+                ac1, ac2, ac3 = st.columns(3)
+                with ac1:
+                    st.markdown("🏆 **1. BEST PERFORMANCE**")
+                    st.write(f"• **Hip**: {best_combo['hip'].split(' — ')[0]}")
+                    st.write(f"• **Knee**: {best_combo['knee'].split(' — ')[0]}")
+                    st.write(f"• **Margins**: Hip: {best_combo['hip_margin']:.0f}% | Knee: {best_combo['knee_margin']:.0f}%")
+                    st.write(f"• **Total Cost**: ₹{best_combo['cost']:,}")
+                with ac2:
+                    st.markdown("⚖️ **2. BETTER / BALANCED**")
+                    st.write(f"• **Hip**: {better_combo['hip'].split(' — ')[0]}")
+                    st.write(f"• **Knee**: {better_combo['knee'].split(' — ')[0]}")
+                    st.write(f"• **Margins**: Hip: {better_combo['hip_margin']:.0f}% | Knee: {better_combo['knee_margin']:.0f}%")
+                    st.write(f"• **Total Cost**: ₹{better_combo['cost']:,}")
+                with ac3:
+                    st.markdown("💰 **3. BUDGET / MAINTAINABLE**")
+                    st.write(f"• **Hip**: {budget_combo['hip'].split(' — ')[0]}")
+                    st.write(f"• **Knee**: {budget_combo['knee'].split(' — ')[0]}")
+                    st.write(f"• **Margins**: Hip: {budget_combo['hip_margin']:.0f}% | Knee: {budget_combo['knee_margin']:.0f}%")
+                    st.write(f"• **Total Cost**: ₹{budget_combo['cost']:,}")
+            else:
+                st.error("⛔ **NO FEASIBLE CONFIGURATIONS**: Even the most powerful motors in the catalog cannot support this robot. Consider reducing payload or chassis mass.")
             
     # Motor height recommendation card
     st.markdown("##### 🎯 Standing Height Limits:")
@@ -684,6 +771,7 @@ with tab_gaits:
     st.markdown("##### 🏃 Gait Feasibility Comparison:")
     gait_rows = []
     for rec in gait_recs:
+        max_h_val = f"{rec['max_height_mm']} mm" if rec['max_height_mm'] > 0 else "Too Weak"
         gait_rows.append({
             "Gait Mode": rec['gait'],
             "Status": "✅ PASS" if rec['feasible'] else "❌ FAIL",
@@ -691,6 +779,7 @@ with tab_gaits:
             "Min Stance Legs": rec['min_stance_legs'],
             "Hip Margin": f"{rec['hip_margin_pct']:.0f}%",
             "Knee Margin": f"{rec['knee_margin_pct']:.0f}%",
+            "Max Safe Height": max_h_val,
             "Speed Fit": rec.get('speed_suitability', 'N/A'),
             "Terrain Fit": rec.get('terrain_suitability', 'N/A'),
         })

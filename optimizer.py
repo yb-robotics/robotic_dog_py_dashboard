@@ -216,8 +216,8 @@ def suggest_cheaper_motor_combination(standing_height_m, total_mass_kg, payload_
                     req_hip = budget["peak_required"]["hip_nm"]
                     req_knee = budget["peak_required"]["knee_nm"]
                     
-                    h_margin = (hip_motor["peak_torque_nm"] - req_hip) / hip_motor["peak_torque_nm"] * 100 if hip_motor["peak_torque_nm"] > 0 else -100
-                    k_margin = (knee_motor["peak_torque_nm"] - req_knee) / knee_motor["peak_torque_nm"] * 100 if knee_motor["peak_torque_nm"] > 0 else -100
+                    h_margin = (hip_motor["peak_nm"] - req_hip) / hip_motor["peak_nm"] * 100 if hip_motor["peak_nm"] > 0 else -100
+                    k_margin = (knee_motor["peak_nm"] - req_knee) / knee_motor["peak_nm"] * 100 if knee_motor["peak_nm"] > 0 else -100
                     
                     if h_margin > 0 and k_margin > 0:
                         min_margin = min(h_margin, k_margin)
