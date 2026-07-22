@@ -12,25 +12,33 @@ import importlib
 import kinematics
 import dynamics
 import motor
+import gait as gait_mod
 import pdf_generator
 
 importlib.reload(kinematics)
 importlib.reload(dynamics)
 importlib.reload(motor)
+importlib.reload(gait_mod)
 importlib.reload(pdf_generator)
 
 from kinematics import (derive_dimensions, leg_fk, leg_ik, leg_jacobian,
-                        jacobian_condition_number)
+                        jacobian_condition_number, compute_workspace_boundary,
+                        manipulability_index)
 from dynamics import (SAFETY_PRESETS, TRANSMISSION_EFFICIENCY_PRESETS,
-                      joint_torque_budget, stair_climb_torque_budget)
-from motor import evaluate_motor, SERVO_PRESETS
-from gait import estimate_max_joint_speed
+                      joint_torque_budget, stair_climb_torque_budget,
+                      compute_mass_matrix)
+from motor import evaluate_motor, SERVO_PRESETS, torque_at_speed, motor_operating_point
+from gait import (estimate_max_joint_speed, recommend_gait, worst_case_gait_margin,
+                  GAITS)
 from pdf_generator import generate_quadruped_pdf_report
 
 try:
-    from optimizer import optimize_leg_geometry
+    from optimizer import (optimize_leg_geometry, optimize_leg_proportions_for_motors,
+                           suggest_cheaper_motor_combination)
 except ImportError:
     optimize_leg_geometry = None
+    optimize_leg_proportions_for_motors = None
+    suggest_cheaper_motor_combination = None
 
 
 MM = 1000.0
@@ -296,6 +304,50 @@ with sim_readout:
         with st.expander("See the kinematics matrix"):
             st.caption("J maps joint speed to foot speed: v = J·q̇. Its transpose maps foot force to joint torque: τ = Jᵀ·F.")
             st.dataframe(pd.DataFrame(J, index=["x", "y", "z"], columns=["ab/ad", "hip", "knee"]).round(4))
+
+            # Manipulability index
+            w_idx = manipulability_index(q_ab, q_hip, q_knee, derived["l1"], thigh, shank)
+            st.metric("Manipulability index (w)", f"{w_idx:.4f}")
+            if w_idx < 0.001:
+                st.warning("Very low manipulability — the robot can barely exert force in some directions at this pose.")
+            elif w_idx < 0.01:
+                st.info("Moderate manipulability — consider adjusting knee bend for better force distribution.")
+            else:
+                st.success("Good manipulability — the robot can exert forces effectively in all directions.")
+            st.caption("w = √det(J·Jᵀ). Higher is better. Near 0 = singularity (robot loses a degree of freedom).")
+
+            # Mass matrix M(q) — uses estimated link masses
+            _est_link_mass = st.session_state.get("mass_links", 0.15)
+            _est_thigh_m = _est_link_mass / 8  # 4 legs × 2 links
+            _est_shank_m = _est_link_mass / 8
+            M = compute_mass_matrix(q_hip, q_knee, _est_thigh_m, _est_shank_m,
+                                     0.5, 0.5, thigh, shank)
+            st.markdown("**2-Link Mass Matrix M(q)**")
+            st.dataframe(pd.DataFrame(M, index=["hip", "knee"], columns=["hip", "knee"]).round(6))
+            st.caption("M(q) maps joint accelerations to inertia torques: τ_inertia = M(q)·q̈. Diagonal = self-inertia, off-diagonal = coupling.")
+
+        # Workspace boundary visualization
+        with st.expander("Workspace boundary (reachable foot positions)"):
+            ws = compute_workspace_boundary(derived["l1"], thigh, shank)
+            ws_col1, ws_col2 = st.columns([2, 1])
+            with ws_col1:
+                fig_ws, ax_ws = plt.subplots(figsize=(6, 5))
+                bp = np.array(ws['boundary_points'])
+                ax_ws.fill(bp[:, 0]*MM, bp[:, 1]*MM, alpha=0.15, color='dodgerblue', label='Reachable workspace')
+                ax_ws.plot(bp[:, 0]*MM, bp[:, 1]*MM, 'b-', linewidth=1.0, alpha=0.5)
+                # Mark current foot position
+                ax_ws.plot(foot_x*MM, foot_z*MM, 'r*', markersize=12, label=f'Current foot ({foot_x*MM:.0f}, {foot_z*MM:.0f}) mm')
+                ax_ws.set_xlabel('X (mm, forward)')
+                ax_ws.set_ylabel('Z (mm, downward = negative)')
+                ax_ws.set_title('Sagittal Plane Workspace')
+                ax_ws.legend(fontsize=8)
+                ax_ws.set_aspect('equal')
+                ax_ws.grid(True, alpha=0.3)
+                st.pyplot(fig_ws, use_container_width=True)
+            with ws_col2:
+                st.metric("Max reach", f"{ws['r_max']*MM:.1f} mm")
+                st.metric("Min reach", f"{ws['r_min']*MM:.1f} mm")
+                st.caption("Max = thigh + shank (fully extended). Min = |thigh − shank| (fully folded). Your foot target should be within this annulus.")
 
 st.divider()
 st.subheader("Kinematic dimensions")
@@ -661,7 +713,181 @@ if stair_sol is not None and stair_direction == "Climb":
     sc1.metric("Energy per step", f"{stair_torque['climb_energy_j']:.2f} J")
     sc2.metric("Min motor peak required", f"{stair_torque['min_motor_peak_nm']:.2f} Nm")
 
-# ---- Dynamic test cases & Optimiser ------------------------------------------------
+# ---- Gait Recommendation Engine ------------------------------------------------
+st.divider()
+st.subheader("Gait Recommendation Engine")
+st.caption("Evaluates which gaits your selected motors can handle, and provides a safety margin if you haven't decided on a gait yet.")
+
+gait_decided = st.radio(
+    "Have you decided which gait to use?",
+    ["Not yet — show me the undecided-gait safety margin",
+     "Yes — I know which gait I want"],
+    index=0,
+    horizontal=True,
+    help="❓ If you haven't decided yet, we'll evaluate your motors against the WORST-CASE torque demand across ALL gaits. "
+         "If your motors pass this, you're safe no matter which gait you choose later."
+)
+
+target_speed = st.slider("Target walking speed (m/s)", 0.05, 2.0, 0.3, 0.05,
+                         help="❓ How fast do you want the robot to walk?\n"
+                              "• 0.1–0.3 m/s = Slow walk (easy on motors)\n"
+                              "• 0.3–0.8 m/s = Normal walking\n"
+                              "• 0.8–2.0 m/s = Fast trot / running (needs powerful motors)")
+
+if gait_decided.startswith("Not yet"):
+    # Undecided gait mode: worst-case analysis
+    wcm = worst_case_gait_margin(
+        hip_peak_nm=hip_peak, knee_peak_nm=knee_peak,
+        hip_cont_nm=hip_cont, knee_cont_nm=knee_cont,
+        robot_mass_kg=robot_mass, payload_kg=payload_mass,
+        standing_height_m=standing_height,
+        thigh_length=thigh, shank_length=shank,
+        hip_offset=derived["l1"],
+        target_speed_mps=target_speed,
+        efficiency=efficiency, safety_factor=safety_factor,
+        thigh_mass_kg=thigh_mass, shank_mass_kg=shank_mass
+    )
+
+    if wcm['undecided_safe']:
+        st.success(f"✅ **SAFE for ANY gait!** Your motors can handle the worst-case scenario "
+                   f"(**{wcm['worst_gait_name']}** gait). "
+                   f"Hip margin: **{wcm['hip_margin_pct']:.0f}%** | Knee margin: **{wcm['knee_margin_pct']:.0f}%**")
+        st.caption("You can decide on any gait later without worrying about motor limits.")
+    else:
+        st.error(f"⚠️ **NOT safe for all gaits.** The worst-case gait (**{wcm['worst_gait_name']}**) "
+                 f"exceeds your motor capacity. "
+                 f"Hip margin: **{wcm['hip_margin_pct']:.0f}%** | Knee margin: **{wcm['knee_margin_pct']:.0f}%**")
+        st.caption("Some gaits will work, but not all. See the table below for which gaits are feasible.")
+
+    wcm_col1, wcm_col2 = st.columns(2)
+    with wcm_col1:
+        st.metric("Worst-case hip peak torque", f"{wcm['worst_hip_peak']:.2f} Nm")
+        st.metric("Worst-case knee peak torque", f"{wcm['worst_knee_peak']:.2f} Nm")
+    with wcm_col2:
+        st.metric("Worst-case hip continuous torque", f"{wcm['worst_hip_cont']:.2f} Nm")
+        st.metric("Worst-case knee continuous torque", f"{wcm['worst_knee_cont']:.2f} Nm")
+
+# Always show the full gait comparison table
+st.markdown("**All Gaits — Feasibility Analysis**")
+gait_recs = recommend_gait(
+    hip_peak_nm=hip_peak, knee_peak_nm=knee_peak,
+    hip_cont_nm=hip_cont, knee_cont_nm=knee_cont,
+    robot_mass_kg=robot_mass, payload_kg=payload_mass,
+    standing_height_m=standing_height,
+    thigh_length=thigh, shank_length=shank,
+    hip_offset=derived["l1"],
+    target_speed_mps=target_speed, terrain=terrain,
+    efficiency=efficiency, safety_factor=safety_factor,
+    thigh_mass_kg=thigh_mass, shank_mass_kg=shank_mass
+)
+
+gait_rows = []
+for rec in gait_recs:
+    status = "✅ PASS" if rec['feasible'] else "❌ FAIL"
+    gait_rows.append({
+        "Gait": rec['gait'],
+        "Status": status,
+        "Duty Factor": f"{rec['duty_factor']:.2f}",
+        "Min Stance Legs": rec['min_stance_legs'],
+        "Hip Margin": f"{rec['hip_margin_pct']:.0f}%",
+        "Knee Margin": f"{rec['knee_margin_pct']:.0f}%",
+        "Speed Fit": rec.get('speed_suitability', 'N/A'),
+        "Terrain Fit": rec.get('terrain_suitability', 'N/A'),
+        "Notes": rec.get('recommendation', '')
+    })
+st.dataframe(pd.DataFrame(gait_rows), use_container_width=True, hide_index=True)
+
+if gait_decided.startswith("Yes"):
+    selected_gait = st.selectbox("Select your gait", list(GAITS.keys()), index=2,
+                                  help="Choose the gait you plan to implement.")
+    matching = [r for r in gait_recs if r['gait'] == selected_gait]
+    if matching:
+        sel = matching[0]
+        if sel['feasible']:
+            st.success(f"✅ **{selected_gait}** gait is feasible! Hip margin: {sel['hip_margin_pct']:.0f}% | Knee margin: {sel['knee_margin_pct']:.0f}%")
+        else:
+            st.error(f"❌ **{selected_gait}** gait exceeds motor capacity. Hip margin: {sel['hip_margin_pct']:.0f}% | Knee margin: {sel['knee_margin_pct']:.0f}%. Consider a stronger motor or lighter robot.")
+
+# ---- Motor Operating Point Analysis -----------------------------------------------
+st.divider()
+st.subheader("Motor Torque-Speed Operating Point")
+st.caption("Real DC motors lose torque as speed increases. This shows where your motor operates on its torque-speed curve during the selected gait.")
+
+# Estimate joint speeds from gait
+selected_gait_for_speed = list(GAITS.keys())[2]  # Default: Trot
+gait_period = 0.6  # Default gait period
+step_length_m = target_speed * gait_period * GAITS[selected_gait_for_speed]['duty_factor']
+step_height_m = 0.03
+joint_speed_est = estimate_max_joint_speed(
+    step_length_m=step_length_m, step_height_m=step_height_m,
+    period_s=gait_period,
+    duty_factor=GAITS[selected_gait_for_speed]['duty_factor'],
+    thigh_length=thigh, shank_length=shank,
+    standing_height_m=standing_height, hip_offset=derived["l1"]
+)
+
+op_col1, op_col2 = st.columns(2)
+with op_col1:
+    st.markdown(f"**Hip Motor ({hip_preset_name})**")
+    hip_op = motor_operating_point(
+        motor_peak_nm=hip_peak, motor_cont_nm=hip_cont,
+        motor_rpm=hip_rpm,
+        required_torque_nm=budget['continuous_required']['hip_nm'],
+        required_speed_rad_s=joint_speed_est.get('peak_hip_rad_s', 2.0)
+    )
+    st.metric("Torque available at gait speed", f"{hip_op['torque_available_at_speed']:.2f} Nm")
+    st.metric("Speed utilization", f"{hip_op['speed_pct']:.0f}%")
+    st.metric("Torque utilization", f"{hip_op['torque_pct']:.0f}%")
+    if hip_op.get('thermal_warning'):
+        st.warning(f"🔥 {hip_op['thermal_warning']}")
+    elif hip_op['in_continuous_region']:
+        st.success("✅ Operating within continuous thermal region.")
+    else:
+        st.warning("⚠️ Operating in intermittent/peak region — risk of overheating.")
+
+with op_col2:
+    st.markdown(f"**Knee Motor ({knee_preset_name})**")
+    knee_op = motor_operating_point(
+        motor_peak_nm=knee_peak, motor_cont_nm=knee_cont,
+        motor_rpm=knee_rpm,
+        required_torque_nm=budget['continuous_required']['knee_nm'],
+        required_speed_rad_s=joint_speed_est.get('peak_knee_rad_s', 2.0)
+    )
+    st.metric("Torque available at gait speed", f"{knee_op['torque_available_at_speed']:.2f} Nm")
+    st.metric("Speed utilization", f"{knee_op['speed_pct']:.0f}%")
+    st.metric("Torque utilization", f"{knee_op['torque_pct']:.0f}%")
+    if knee_op.get('thermal_warning'):
+        st.warning(f"🔥 {knee_op['thermal_warning']}")
+    elif knee_op['in_continuous_region']:
+        st.success("✅ Operating within continuous thermal region.")
+    else:
+        st.warning("⚠️ Operating in intermittent/peak region — risk of overheating.")
+
+# Torque-speed curve plot
+fig_ts, (ax_h, ax_k) = plt.subplots(1, 2, figsize=(12, 4))
+for ax, label, peak, cont, rpm, req_t, req_s in [
+    (ax_h, f"Hip ({hip_preset_name})", hip_peak, hip_cont, hip_rpm,
+     budget['continuous_required']['hip_nm'], joint_speed_est.get('peak_hip_rad_s', 2.0)),
+    (ax_k, f"Knee ({knee_preset_name})", knee_peak, knee_cont, knee_rpm,
+     budget['continuous_required']['knee_nm'], joint_speed_est.get('peak_knee_rad_s', 2.0))
+]:
+    omega_nl = rpm * 2 * np.pi / 60
+    speeds = np.linspace(0, omega_nl, 100)
+    torques = peak * (1 - speeds / omega_nl)
+    ax.fill_between(speeds, 0, np.minimum(torques, cont), alpha=0.2, color='green', label='Continuous region')
+    ax.fill_between(speeds, cont, torques, where=torques > cont, alpha=0.15, color='orange', label='Peak/intermittent')
+    ax.plot(speeds, torques, 'b-', linewidth=2, label='T-ω curve')
+    ax.axhline(y=cont, color='green', linestyle='--', alpha=0.6, label=f'Continuous: {cont:.2f} Nm')
+    ax.plot(req_s, req_t, 'r*', markersize=15, label=f'Operating point')
+    ax.set_xlabel('Joint speed (rad/s)')
+    ax.set_ylabel('Torque (Nm)')
+    ax.set_title(label)
+    ax.legend(fontsize=7)
+    ax.grid(True, alpha=0.3)
+fig_ts.tight_layout()
+st.pyplot(fig_ts, use_container_width=True)
+
+# ---- Dynamic test cases ------------------------------------------------
 st.divider()
 st.subheader("Dynamic test cases")
 TESTS = {"Standing": (4, 0.0, 1.0), "Crouching": (4, .5, 1.1), "Walking": (3, 1.0, 1.3), "Trotting": (2, 2.0, 1.7), "Acceleration": (2, 4.0, 1.5), "Stopping": (2, 4.0, 1.5), "Slope standing": (3, 1.5, 1.2), "One-leg disturbance": (3, 3.0, 1.8), "Landing / impact": (2, 3.0, 2.5)}
@@ -671,14 +897,87 @@ for name, (legs, accel, impact) in TESTS.items():
     rows.append({"Test": name, "Stance legs": legs, "Hip peak (Nm)": round(test["peak_required"]["hip_nm"],2), "Knee peak (Nm)": round(test["peak_required"]["knee_nm"],2)})
 st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
-with st.expander("AI-assisted geometry recommendation (offline numerical optimiser)"):
-    st.caption("This is a local differential-evolution optimiser. It searches valid thigh/shank proportions to reduce peak knee torque.")
-    if optimize_leg_geometry is None:
-        st.warning("Install the optional optimiser dependency with `pip install -r requirements.txt` to enable this panel.")
-    elif st.button("Find lower-torque leg proportions"):
-        result = optimize_leg_geometry(standing_height, robot_mass, payload_mass, thigh_mass, shank_mass, stance_legs, dynamic_accel, impact_factor, efficiency, safety_factor, has_abad, derived["l1"])
-        st.success(f"Suggested thigh {result['thigh_length_m']*MM:.1f} mm, shank {result['shank_length_m']*MM:.1f} mm; estimated knee-peak improvement {result['improvement_pct']:.1f}%.")
+# ---- Smart Motor-Aware Leg Proportion Optimizer -----------------------------------
+st.divider()
+st.subheader("Smart Motor-Aware Leg Proportion Optimizer")
+st.caption("Optimizes thigh/shank ratio to balance torque load between hip and knee joints for your selected motors.")
 
+# Current utilization
+hip_util = budget['peak_required']['hip_nm'] / hip_peak * 100 if hip_peak > 0 else 999
+knee_util = budget['peak_required']['knee_nm'] / knee_peak * 100 if knee_peak > 0 else 999
+
+util_col1, util_col2, util_col3 = st.columns(3)
+util_col1.metric("Current hip utilization", f"{hip_util:.0f}%",
+                  delta=f"{'OK' if hip_util < 100 else 'OVERLOADED'}")
+util_col2.metric("Current knee utilization", f"{knee_util:.0f}%",
+                  delta=f"{'OK' if knee_util < 100 else 'OVERLOADED'}")
+util_col3.metric("Current femur fraction", f"{derived.get('femur_fraction', 0.52):.0%}")
+
+if optimize_leg_proportions_for_motors is not None:
+    with st.expander("🔧 Run Dual-Objective Leg Optimizer (balances hip + knee torque)", expanded=False):
+        st.caption("Searches for the thigh/shank split that gives both joints their BEST margin simultaneously, instead of just minimizing knee torque.")
+        if st.button("🚀 Optimize leg proportions for selected motors"):
+            opt_result = optimize_leg_proportions_for_motors(
+                standing_height, robot_mass, payload_mass,
+                thigh_mass, shank_mass, stance_legs,
+                dynamic_accel, impact_factor, efficiency, safety_factor,
+                has_abad, derived["l1"],
+                hip_peak, hip_cont, knee_peak, knee_cont
+            )
+            st.success(f"✅ **Optimized proportions**: Thigh = **{opt_result['thigh_length_m']*MM:.1f} mm** "
+                       f"({opt_result['femur_fraction']:.0%}), Shank = **{opt_result['shank_length_m']*MM:.1f} mm** "
+                       f"({1-opt_result['femur_fraction']:.0%})")
+            opt_c1, opt_c2, opt_c3 = st.columns(3)
+            opt_c1.metric("Optimized hip utilization", f"{opt_result['hip_utilization_pct']:.0f}%")
+            opt_c2.metric("Optimized knee utilization", f"{opt_result['knee_utilization_pct']:.0f}%")
+            opt_c3.metric("Improvement", f"{opt_result.get('improvement_pct', 0):.1f}%")
+
+            # Visual comparison bar chart
+            fig_opt, ax_opt = plt.subplots(figsize=(8, 3))
+            x_labels = ['Hip', 'Knee']
+            current_vals = [hip_util, knee_util]
+            optimized_vals = [opt_result['hip_utilization_pct'], opt_result['knee_utilization_pct']]
+            x = np.arange(len(x_labels))
+            w = 0.35
+            ax_opt.bar(x - w/2, current_vals, w, label='Current', color='#ff7043', alpha=0.8)
+            ax_opt.bar(x + w/2, optimized_vals, w, label='Optimized', color='#66bb6a', alpha=0.8)
+            ax_opt.axhline(y=100, color='red', linestyle='--', label='100% limit', alpha=0.7)
+            ax_opt.set_ylabel('Motor utilization (%)')
+            ax_opt.set_title('Current vs Optimized Torque Utilization')
+            ax_opt.set_xticks(x)
+            ax_opt.set_xticklabels(x_labels)
+            ax_opt.legend()
+            ax_opt.grid(True, alpha=0.3, axis='y')
+            fig_opt.tight_layout()
+            st.pyplot(fig_opt, use_container_width=True)
+
+if suggest_cheaper_motor_combination is not None:
+    with st.expander("💰 Cost-Saving Motor Suggestions (find cheaper motor combos)", expanded=False):
+        st.caption("Searches for cheaper motor combinations that still pass torque requirements, possibly with adjusted leg proportions.")
+        if st.button("🔍 Find cheaper motor combinations"):
+            suggestions = suggest_cheaper_motor_combination(
+                standing_height, robot_mass, payload_mass,
+                thigh_mass, shank_mass, stance_legs,
+                dynamic_accel, impact_factor, efficiency, safety_factor,
+                has_abad, derived["l1"],
+                hip_preset_name, knee_preset_name, dof_total
+            )
+            if suggestions:
+                st.success(f"Found **{len(suggestions)}** cheaper motor combination(s)!")
+                cost_rows = []
+                for s in suggestions[:5]:  # Show top 5
+                    cost_rows.append({
+                        "Hip Motor": s['hip_motor'],
+                        "Knee Motor": s['knee_motor'],
+                        "Femur Fraction": f"{s['femur_fraction']:.0%}",
+                        "Total Motor Cost": f"₹{s['total_motor_cost']:,}",
+                        "Savings": f"₹{s['cost_savings']:,}",
+                        "Hip Margin": f"{s['hip_margin_pct']:.0f}%",
+                        "Knee Margin": f"{s['knee_margin_pct']:.0f}%"
+                    })
+                st.dataframe(pd.DataFrame(cost_rows), use_container_width=True, hide_index=True)
+            else:
+                st.info("No cheaper motor combination found that meets torque requirements. Your current selection is already cost-optimal for this design.")
 # ---- Mass breakdown (at the end of the page) ----------------------------------------
 st.divider()
 st.subheader("Mass breakdown")
@@ -774,7 +1073,11 @@ pdf_data = {
     'q_knee_deg': np.degrees(q_knee),
     'jacobian_matrix': leg_jacobian(q_ab, q_hip, q_knee, derived["l1"], thigh, shank) if sol is not None else None,
     'jacobian_condition': jacobian_condition if jacobian_condition is not None else 1.0,
+    'manipulability_index': manipulability_index(q_ab, q_hip, q_knee, derived["l1"], thigh, shank) if sol is not None else 0.0,
+    'mass_matrix': compute_mass_matrix(q_hip, q_knee, thigh_mass, shank_mass, thigh_com, shank_com, thigh, shank).tolist(),
     'torque_budget': budget,
+    'gait_recommendations': gait_recs,
+    'motor_operating_points': {'hip': hip_op, 'knee': knee_op},
     'battery_calc': {
         'voltage_cell': lipo_cells,
         'req_capacity_mah': req_capacity_mah,

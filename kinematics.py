@@ -76,6 +76,61 @@ def jacobian_condition_number(theta1, theta2, theta3, l1, l2, l3):
     return float(np.linalg.cond(leg_jacobian(theta1, theta2, theta3, l1, l2, l3)))
 
 
+def compute_workspace_boundary(l1, l2, l3, n_points=72):
+    """Computes the sagittal plane workspace boundary for the leg."""
+    r_max = l2 + l3
+    r_min = abs(l2 - l3)
+    
+    boundary_points = []
+    # trace outer boundary
+    for angle in np.linspace(0, 2 * np.pi, n_points // 2):
+        boundary_points.append((r_max * np.sin(angle), -r_max * np.cos(angle)))
+    # trace inner boundary
+    for angle in np.linspace(2 * np.pi, 0, n_points // 2):
+        boundary_points.append((r_min * np.sin(angle), -r_min * np.cos(angle)))
+        
+    return {
+        'r_max': r_max,
+        'r_min': r_min,
+        'boundary_points': boundary_points
+    }
+
+
+def manipulability_index(theta1, theta2, theta3, l1, l2, l3):
+    """Computes manipulability index w = sqrt(det(J @ J.T))."""
+    J = leg_jacobian(theta1, theta2, theta3, l1, l2, l3)
+    det = np.linalg.det(J @ J.T)
+    if det <= 0:
+        return 0.0
+    return float(np.sqrt(det))
+
+
+def damped_least_squares_ik(x, y, z, l1, l2, l3, q_init=None, damping=0.01, max_iter=50, tol=1e-4):
+    """Iterative IK using Damped Least Squares: Δq = J^T(JJ^T + λ²I)^{-1} * e"""
+    if q_init is None:
+        q = np.array([0.0, 0.0, np.pi/4])
+    else:
+        q = np.array(q_init, dtype=float)
+        
+    target_pos = np.array([x, y, z])
+    
+    for _ in range(max_iter):
+        current_pos = leg_fk(q[0], q[1], q[2], l1, l2, l3)
+        error = target_pos - current_pos
+        if np.linalg.norm(error) < tol:
+            return float(q[0]), float(q[1]), float(q[2])
+            
+        J = leg_jacobian(q[0], q[1], q[2], l1, l2, l3)
+        J_T = J.T
+        lambda_I = (damping ** 2) * np.eye(3)
+        inv_term = np.linalg.inv(J @ J_T + lambda_I)
+        delta_q = J_T @ inv_term @ error
+        
+        q += delta_q
+        
+    return None
+
+
 def derive_dimensions(dof_total, standing_height_m, femur_fraction=0.52,
                       neutral_knee_deg=55.0):
     """Given total DOF (8 or 12) and desired approx standing height,

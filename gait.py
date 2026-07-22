@@ -9,12 +9,22 @@ dashboard must say so explicitly, rather than silently producing a 12-DOF-
 looking trajectory the hardware can't actually execute.
 """
 import numpy as np
+from kinematics import leg_ik
+from dynamics import joint_torque_budget
 
 GAITS = {
     "Walk": {"duty_factor": 0.75,
               "phase_offsets": {"FR": 0.0, "RL": 0.25, "FL": 0.5, "RR": 0.75}},
+    "Amble": {"duty_factor": 0.65,
+              "phase_offsets": {"FR": 0.0, "RL": 0.15, "FL": 0.5, "RR": 0.65}},
     "Trot": {"duty_factor": 0.5,
               "phase_offsets": {"FR": 0.0, "RL": 0.0, "FL": 0.5, "RR": 0.5}},
+    "Pace": {"duty_factor": 0.5,
+             "phase_offsets": {"FR": 0.0, "RL": 0.5, "FL": 0.5, "RR": 0.0}},
+    "Bound": {"duty_factor": 0.4,
+              "phase_offsets": {"FR": 0.0, "RL": 0.5, "FL": 0.0, "RR": 0.5}},
+    "Pronk": {"duty_factor": 0.35,
+              "phase_offsets": {"FR": 0.0, "RL": 0.0, "FL": 0.0, "RR": 0.0}},
 }
 
 
@@ -88,7 +98,6 @@ def estimate_max_joint_speed(step_length_m, step_height_m, period_s, duty_factor
     to find the maximum angular velocity each joint experiences.
     Returns dict with 'hip_rad_s', 'knee_rad_s', 'hip_deg_s', 'knee_deg_s'.
     """
-    from kinematics import leg_ik
     
     swing_duration = period_s * (1 - duty_factor)
     if swing_duration <= 0:
@@ -137,3 +146,146 @@ def estimate_max_joint_speed(step_length_m, step_height_m, period_s, duty_factor
         'knee_deg_s': np.degrees(max_knee),
     }
 
+def recommend_gait(*, hip_peak_nm, knee_peak_nm, hip_cont_nm, knee_cont_nm,
+                    robot_mass_kg, payload_kg, standing_height_m,
+                    thigh_length, shank_length, hip_offset,
+                    target_speed_mps, terrain, efficiency, safety_factor,
+                    thigh_mass_kg=0.02, shank_mass_kg=0.02):
+    recommendations = []
+    
+    for gait_name, gait_params in GAITS.items():
+        duty_factor = gait_params["duty_factor"]
+        
+        if duty_factor >= 0.75:
+            min_stance = 3
+        elif duty_factor >= 0.5:
+            min_stance = 2
+        elif duty_factor >= 0.35:
+            min_stance = 1
+        else:
+            min_stance = 0
+            
+        sol = leg_ik(0.0, hip_offset, -standing_height_m, hip_offset, thigh_length, shank_length)
+        if sol is None:
+            qa, qf, qk = 0.0, 0.0, 0.0
+        else:
+            qa, qf, qk = sol
+            
+        budget = joint_torque_budget(
+            hip_flexion=qf, knee_flexion=qk, hip_abduction=qa,
+            hip_offset=hip_offset, thigh_length=thigh_length, shank_length=shank_length,
+            total_mass_kg=robot_mass_kg, payload_kg=payload_kg,
+            thigh_mass_kg=thigh_mass_kg, shank_mass_kg=shank_mass_kg,
+            thigh_com_frac=0.5, shank_com_frac=0.5,
+            legs_in_stance=max(1, min_stance), dynamic_accel_mps2=9.81 if min_stance==0 else 2.0,
+            impact_factor=1.5 if min_stance<2 else 1.1, 
+            transmission_efficiency=efficiency,
+            safety_factor=safety_factor
+        )
+        
+        req_hip = budget["peak_required"]["hip_nm"]
+        req_knee = budget["peak_required"]["knee_nm"]
+        
+        hip_margin = (hip_peak_nm - req_hip) / hip_peak_nm * 100 if hip_peak_nm > 0 else 0
+        knee_margin = (knee_peak_nm - req_knee) / knee_peak_nm * 100 if knee_peak_nm > 0 else 0
+        
+        feasible = (hip_margin > 0) and (knee_margin > 0)
+        
+        if gait_name == "Walk": speed_suitability = "Walk for <0.3 m/s"
+        elif gait_name == "Amble": speed_suitability = "Amble for 0.3-0.5"
+        elif gait_name == "Trot": speed_suitability = "Trot for 0.3-1.0"
+        elif gait_name == "Pace": speed_suitability = "Pace for 0.5-1.0"
+        elif gait_name == "Bound": speed_suitability = "Bound for 0.8-2.0"
+        elif gait_name == "Pronk": speed_suitability = "Pronk for jumping"
+        else: speed_suitability = "Unknown"
+        
+        if gait_name in ["Walk", "Amble"]: terrain_suitability = "Walk/Amble best for uneven/stairs"
+        elif gait_name == "Trot": terrain_suitability = "Trot best for flat"
+        elif gait_name == "Pace": terrain_suitability = "Pace for flat only"
+        elif gait_name in ["Bound", "Pronk"]: terrain_suitability = "Bound/Pronk for flat only"
+        else: terrain_suitability = "Unknown"
+
+        recommendations.append({
+            "gait": gait_name,
+            "feasible": feasible,
+            "hip_margin_pct": hip_margin,
+            "knee_margin_pct": knee_margin,
+            "min_stance_legs": min_stance,
+            "duty_factor": duty_factor,
+            "speed_suitability": speed_suitability,
+            "terrain_suitability": terrain_suitability,
+            "recommendation": "Recommended" if feasible else "Not feasible"
+        })
+        
+    return sorted(recommendations, key=lambda x: (-int(x["feasible"]), -x["min_stance_legs"]))
+
+
+def worst_case_gait_margin(*, hip_peak_nm, knee_peak_nm, hip_cont_nm, knee_cont_nm,
+                            robot_mass_kg, payload_kg, standing_height_m,
+                            thigh_length, shank_length, hip_offset,
+                            target_speed_mps, efficiency, safety_factor,
+                            thigh_mass_kg=0.02, shank_mass_kg=0.02):
+    worst_hip_peak = 0.0
+    worst_knee_peak = 0.0
+    worst_hip_cont = 0.0
+    worst_knee_cont = 0.0
+    worst_gait = ""
+    
+    for gait_name, gait_params in GAITS.items():
+        duty_factor = gait_params["duty_factor"]
+        
+        if duty_factor >= 0.75:
+            min_stance = 3
+        elif duty_factor >= 0.5:
+            min_stance = 2
+        elif duty_factor >= 0.35:
+            min_stance = 1
+        else:
+            min_stance = 0
+            
+        sol = leg_ik(0.0, hip_offset, -standing_height_m, hip_offset, thigh_length, shank_length)
+        if sol is None:
+            qa, qf, qk = 0.0, 0.0, 0.0
+        else:
+            qa, qf, qk = sol
+            
+        budget = joint_torque_budget(
+            hip_flexion=qf, knee_flexion=qk, hip_abduction=qa,
+            hip_offset=hip_offset, thigh_length=thigh_length, shank_length=shank_length,
+            total_mass_kg=robot_mass_kg, payload_kg=payload_kg,
+            thigh_mass_kg=thigh_mass_kg, shank_mass_kg=shank_mass_kg,
+            thigh_com_frac=0.5, shank_com_frac=0.5,
+            legs_in_stance=max(1, min_stance), dynamic_accel_mps2=9.81 if min_stance==0 else 2.0,
+            impact_factor=1.5 if min_stance<2 else 1.1, 
+            transmission_efficiency=efficiency,
+            safety_factor=safety_factor
+        )
+        
+        req_hip = budget["peak_required"]["hip_nm"]
+        req_knee = budget["peak_required"]["knee_nm"]
+        req_hip_cont = budget["continuous_required"]["hip_nm"]
+        req_knee_cont = budget["continuous_required"]["knee_nm"]
+        
+        if req_hip > worst_hip_peak or req_knee > worst_knee_peak:
+            worst_hip_peak = max(worst_hip_peak, req_hip)
+            worst_knee_peak = max(worst_knee_peak, req_knee)
+            worst_hip_cont = max(worst_hip_cont, req_hip_cont)
+            worst_knee_cont = max(worst_knee_cont, req_knee_cont)
+            worst_gait = gait_name
+            
+    hip_margin = (hip_peak_nm - worst_hip_peak) / hip_peak_nm * 100 if hip_peak_nm > 0 else 0
+    knee_margin = (knee_peak_nm - worst_knee_peak) / knee_peak_nm * 100 if knee_peak_nm > 0 else 0
+    
+    all_feasible = (hip_margin > 0) and (knee_margin > 0)
+    
+    return {
+        'worst_hip_peak': worst_hip_peak,
+        'worst_knee_peak': worst_knee_peak,
+        'worst_hip_cont': worst_hip_cont,
+        'worst_knee_cont': worst_knee_cont,
+        'worst_gait_name': worst_gait,
+        'hip_margin_pct': hip_margin,
+        'knee_margin_pct': knee_margin,
+        'all_gaits_feasible': all_feasible,
+        'undecided_safe': all_feasible
+    }

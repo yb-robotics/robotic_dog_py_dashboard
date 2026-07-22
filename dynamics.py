@@ -13,6 +13,31 @@ from kinematics import leg_jacobian
 G = 9.81
 
 
+def compute_mass_matrix(hip_flexion, knee_flexion, thigh_mass_kg, shank_mass_kg,
+                        thigh_com_frac, shank_com_frac, thigh_length, shank_length):
+    """Computes the 2x2 mass matrix M(q) for the 2-link leg."""
+    I_thigh = (1.0 / 3.0) * thigh_mass_kg * (thigh_length ** 2)
+    I_shank = (1.0 / 3.0) * shank_mass_kg * (shank_length ** 2)
+    l2c = shank_com_frac * shank_length
+
+    M11 = I_thigh + I_shank + shank_mass_kg * (thigh_length ** 2) + 2 * shank_mass_kg * thigh_length * l2c * np.cos(knee_flexion)
+    M12 = I_shank + shank_mass_kg * thigh_length * l2c * np.cos(knee_flexion)
+    M21 = M12
+    M22 = I_shank
+
+    return np.array([[M11, M12], [M21, M22]])
+
+
+def compute_inertia_torque(hip_flexion, knee_flexion, hip_accel, knee_accel,
+                           thigh_mass_kg, shank_mass_kg, thigh_com_frac, shank_com_frac,
+                           thigh_length, shank_length):
+    """Computes M(q) @ q_ddot for proper inertia torque."""
+    M = compute_mass_matrix(hip_flexion, knee_flexion, thigh_mass_kg, shank_mass_kg,
+                            thigh_com_frac, shank_com_frac, thigh_length, shank_length)
+    accel_vec = np.array([hip_accel, knee_accel])
+    return M @ accel_vec
+
+
 def two_link_gravity_torque(hip_flexion, knee_flexion, thigh_mass, shank_mass,
                              thigh_com_frac, shank_com_frac, thigh_length, shank_length):
     """Classic 2-link planar pendulum gravity torque (hip measured from
@@ -60,7 +85,8 @@ def joint_torque_budget(*, hip_flexion, knee_flexion, hip_abduction,
                          thigh_com_frac, shank_com_frac,
                          legs_in_stance, dynamic_accel_mps2, impact_factor,
                          transmission_efficiency, safety_factor,
-                         hip_velocity_rad_s=0.0, knee_velocity_rad_s=0.0):
+                         hip_velocity_rad_s=0.0, knee_velocity_rad_s=0.0,
+                         duty_factor=1.0):
     """Full torque budget: static / continuous-required / peak-required,
     separately for hip and knee (and an ab/ad estimate).
 
@@ -97,7 +123,12 @@ def joint_torque_budget(*, hip_flexion, knee_flexion, hip_abduction,
     # Horizontal acceleration is represented as the fore/aft contact force.
     # Vertical acceleration is intentionally not assumed here; use impact
     # factor for touchdown/transient loading rather than double counting it.
-    F_dyn = np.array([supported_mass_per_leg * dynamic_accel_mps2, 0.0, weight_per_leg])
+    
+    F_z = weight_per_leg
+    if 0.1 < duty_factor < 1.0:
+        F_z = weight_per_leg / duty_factor
+
+    F_dyn = np.array([supported_mass_per_leg * dynamic_accel_mps2, 0.0, F_z])
     tau_ab_c, tau_hip_c, tau_knee_c = grf_joint_torque(
         hip_abduction, hip_flexion, knee_flexion, hip_offset, thigh_length, shank_length, F_dyn)
     # Rotational inertia torque: I = (1/3) * m * L^2
