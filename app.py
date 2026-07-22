@@ -7,8 +7,8 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import streamlit as st
-
 import importlib
+
 import kinematics
 import dynamics
 import motor
@@ -40,17 +40,14 @@ except ImportError:
     optimize_leg_proportions_for_motors = None
     suggest_cheaper_motor_combination = None
 
-
 MM = 1000.0
 G = 9.81
 st.set_page_config(page_title="Quadruped Design Dashboard", layout="wide")
-
 
 def mm_input(label, value_mm, minimum=1.0, maximum=2000.0, step=1.0, **kwargs):
     """Return an SI value while keeping every UI length input in mm."""
     return st.number_input(label, min_value=float(minimum), max_value=float(maximum),
                            value=float(value_mm), step=float(step), **kwargs) / MM
-
 
 def posture_dimensions(dof_total, standing_height_m, femur_fraction, neutral_knee_deg):
     """Geometry from actual standing posture, compatible with cached modules."""
@@ -72,14 +69,13 @@ def posture_dimensions(dof_total, standing_height_m, femur_fraction, neutral_kne
     })
     return dimensions
 
-
 def plot_leg(thigh, shank, q_hip, q_knee, target, reachable):
     """A clear dog-leg diagram: hip joint → thigh → knee joint → shank → paw."""
     hip = np.array([0.0, 0.0])
     knee = np.array([thigh * np.sin(q_hip), -thigh * np.cos(q_hip)])
     paw = knee + np.array([shank * np.sin(q_hip + q_knee),
                             -shank * np.cos(q_hip + q_knee)])
-    fig, ax = plt.subplots(figsize=(6.3, 5.1))
+    fig, ax = plt.subplots(figsize=(6.0, 5.0))
     ax.plot([hip[0], knee[0]], [hip[1], knee[1]], "o-", lw=10, ms=10,
             color="#aa6a3d", label="Thigh (upper leg)")
     ax.plot([knee[0], paw[0]], [knee[1], paw[1]], "o-", lw=8, ms=10,
@@ -98,7 +94,6 @@ def plot_leg(thigh, shank, q_hip, q_knee, target, reachable):
     ax.axhline(-reach, ls="--", color="gray", lw=1, label="Maximum extension")
     ax.grid(alpha=.25); ax.set_aspect("equal"); ax.legend(fontsize=8, loc="upper right")
     return fig
-
 
 def stair_pose(thigh, shank, hip_angle, knee_angle, target, standing_h,
                riser_h, tread, direction, reachable):
@@ -130,9 +125,8 @@ def stair_pose(thigh, shank, hip_angle, knee_angle, target, standing_h,
     ax.set_aspect("equal"); ax.grid(alpha=.25); ax.legend(fontsize=8, loc="upper right")
     return fig
 
-
 def assess_stair_target(target, thigh, shank, hip_offset, knee_forward,
-                        hip_min, hip_max, knee_min, knee_max):
+                         hip_min, hip_max, knee_min, knee_max):
     """IK and joint-limit check for a planned paw landing on a stair."""
     solution = leg_ik(*target, hip_offset, thigh, shank, knee_forward)
     if solution is None:
@@ -145,7 +139,6 @@ def assess_stair_target(target, thigh, shank, hip_offset, knee_forward,
     if not knee_min <= knee_deg <= knee_max:
         issues.append(f"Knee joint {knee_deg:.1f}° is outside {knee_min:.0f}° to {knee_max:.0f}°.")
     return solution, issues
-
 
 def recommend_max_standing_height_for_motor(*, hip_peak_nm, hip_cont_nm, knee_peak_nm, knee_cont_nm,
                                             dof_total, femur_fraction, neutral_knee_deg, total_mass_kg,
@@ -179,42 +172,94 @@ def recommend_max_standing_height_for_motor(*, hip_peak_nm, hip_cont_nm, knee_pe
             max_h_mm = h_mm
     return max_h_mm
 
+# ---- Initialize session state variables for bidirectional synchronization & values ----
+session_defaults = {
+    "mass_payload": 0.0,
+    "mass_motor": 0.48,
+    "mass_battery": 0.20,
+    "mass_frame": 0.25,
+    "mass_links": 0.15,
+    "mass_payload_x": 0.0,
+    "knee_forward": True,
+    "use_custom": False,
+    "thigh_length_mm_custom": 180.0,
+    "shank_length_mm_custom": 180.0,
+    "foot_x_mm": 0.0,
+    "foot_y_mm": 0.0,
+    "foot_z_mm": -350.0,
+}
 
-# Initialize session state payload synchronization
-if "mass_payload" not in st.session_state:
-    st.session_state["mass_payload"] = 0.0
+for k, v in session_defaults.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
 
-# ---- TOP HEADER WITH PDF DOWNLOAD BUTTON -------------------------------------------
+# ---- TOP TITLE HEADER & DOWNLOAD PDF CONTAINER -------------------------------------------
 col_title, col_pdf = st.columns([3.2, 1.2])
 with col_title:
     st.title("🐕 Quadruped Robot Design Dashboard")
-    st.caption("Kinematics first → mass & dual-motor selection → torque budget → PDF Report Exporter. All dimensions in mm.")
+    st.caption("A multi-disciplinary design wizard: Geometry & Kinematics → Motor Selection & Torque Budget → Gaits & Curves → Mass & Power.")
 
-# Placeholder for PDF download button (rendered after calculations)
 pdf_button_container = col_pdf.container()
 
-# ---- Sidebar Inputs ---------------------------------------------------------------
+# ---- GLOBAL SIDEBAR CONTROLS -------------------------------------------------------------
 with st.sidebar:
-    st.header("1. Beginner design wizard")
-    st.caption("Start here. These values drive the geometry and give you a practical first-build direction.")
+    st.header("🌐 Global Parameters")
+    st.caption("Configure the baseline payload, degrees of freedom, terrain, and safety factors.")
+    
     dof_total = st.radio("Total degrees of freedom", [8, 12], index=0, horizontal=True)
-    standing_height = mm_input("Target standing height (mm)", 350, 0.1, 1500, 0.1,
-                               help="Example: enter 9.7 for 0.97 cm, or 970 for 0.97 m.")
-    femur_fraction = st.slider("Femur share of total leg length (%)", 35, 65, 52, 1) / 100
-    neutral_knee_deg = st.slider("Neutral standing knee bend (degrees)", 15, 120, 55, 1,
-                                 help="A bent knee avoids the full-extension singularity. 45–70° is a sensible first prototype range.")
-    terrain = st.selectbox("Primary terrain", ["Indoor flat floor", "Carpet / grass", "Small stairs", "Uneven outdoor ground"])
-
-    # Synchronized Payload Input across sidebar and mass section
-    sidebar_payload = st.number_input("Expected payload (kg)", 0.0, 50.0,
-                                      float(st.session_state["mass_payload"]), 0.01,
-                                      key="sidebar_payload_input",
-                                      help="Extra weight carried on top of the robot (e.g. camera, arm, sensors). Changing this updates the Mass Breakdown section automatically.")
+    terrain = st.selectbox("Primary terrain type", ["Indoor flat floor", "Carpet / grass", "Small stairs", "Uneven outdoor ground"])
+    
+    # Bidirectionally synchronized payload input
+    sidebar_payload = st.number_input(
+        "Expected payload (kg)", 0.0, 50.0,
+        float(st.session_state["mass_payload"]), 0.01,
+        key="sidebar_payload_input",
+        help="Extra weight carried on top of the robot chassis. Instantly synchronized across tabs."
+    )
     st.session_state["mass_payload"] = sidebar_payload
+    
+    st.divider()
+    st.header("🛠️ Engineering Assumptions")
+    safety_name = st.selectbox("Safety factor multiplier", list(SAFETY_PRESETS), index=2,
+                               help="Applied to peak joint torque for shock load and dynamic safety margin.")
+    safety_factor = SAFETY_PRESETS[safety_name]
+    
+    transmission_name = st.selectbox("Transmission efficiency preset", list(TRANSMISSION_EFFICIENCY_PRESETS), index=1)
+    efficiency = TRANSMISSION_EFFICIENCY_PRESETS[transmission_name]
 
-    target_speed = st.number_input("Desired walking speed (m/s)", 0.0, 5.0, .25, .05)
-    st.caption("0.97 cm = 9.7 mm. A value of 97 means 97 mm (9.7 cm), which is a very small robot.")
+# ---- DEFINE 4 WORKFLOW TABS --------------------------------------------------------------
+tab_geom, tab_actuators, tab_gaits, tab_power_opt = st.tabs([
+    "📐 Step 1: Geometry & Kinematics",
+    "⚙️ Step 2: Actuators & Torque Budget",
+    "🏃 Step 3: Gait Sizing & Torque-Speed Curves",
+    "🔋 Step 4: Mass, Power & Optimizers"
+])
 
+# =========================================================================================
+# TAB 1: GEOMETRY & KINEMATICS
+# =========================================================================================
+with tab_geom:
+    st.subheader("📐 Physical Geometry Wizard & Kinematics Simulator")
+    
+    # Geometry sliders
+    gcol1, gcol2, gcol3 = st.columns(3)
+    with gcol1:
+        standing_height = mm_input(
+            "Target standing height (mm)", 350.0, 50.0, 1500.0, 10.0,
+            help="Target height measured from the hip axis to ground at neutral standing posture."
+        )
+    with gcol2:
+        femur_fraction = st.slider("Thigh/femur share of total leg length (%)", 35, 65, 52, 1) / 100
+    with gcol3:
+        neutral_knee_deg = st.slider(
+            "Neutral standing knee bend (degrees)", 15, 120, 55, 1,
+            help="Bent knee avoids geometric singularity. 45°-70° is standard."
+        )
+        
+    derived = posture_dimensions(dof_total, standing_height, femur_fraction, neutral_knee_deg)
+    has_abad = derived["has_abad"]
+    
+    # Check stair gate height constraints immediately if terrain is stairs
     if terrain == "Small stairs":
         std_riser_m = 0.178
         min_viable_height_mm = None
@@ -229,831 +274,690 @@ with st.sidebar:
                 break
         stair_min_height = max(min_viable_height_mm or 300, 270 if dof_total == 12 else 300)
         if standing_height * MM < stair_min_height:
-            st.error(f"⛔ CANNOT CLIMB standard 178 mm stairs at this height ({standing_height*MM:.0f} mm). "
-                     f"Minimum standing height: **{stair_min_height} mm**. "
-                     f"Increase height to ≥ {stair_min_height} mm, or change terrain.")
+            st.error(f"⛔ **HEIGHT FAILURE FOR STAIRS**: Target height ({standing_height*MM:.0f} mm) is too small to clear a standard 178 mm stair riser. Minimum required height: **{stair_min_height} mm**.")
         else:
-            st.success(f"Height passes the stair gate (≥ {stair_min_height} mm).")
-
-    if dof_total == 8:
-        st.warning("8-DOF is cheaper and easier, but has no active lateral balance. Choose 12-DOF for uneven ground or stairs.")
-    else:
-        st.success("12-DOF is the better mechanical choice for uneven terrain because each hip can place the foot laterally.")
+            st.success(f"✅ Height clears standard stair climbing gate (≥ {stair_min_height} mm).")
 
     st.divider()
-    st.header("Engineering assumptions")
-    safety_name = st.selectbox("Engineering safety assumption", list(SAFETY_PRESETS), index=2,
-        help="Choose the operating severity; this multiplier is applied to peak required torque.")
-    safety_factor = SAFETY_PRESETS[safety_name]
-    transmission_name = st.selectbox("Transmission type", list(TRANSMISSION_EFFICIENCY_PRESETS), index=1)
-    efficiency = TRANSMISSION_EFFICIENCY_PRESETS[transmission_name]
-
-derived = posture_dimensions(dof_total, standing_height, femur_fraction, neutral_knee_deg)
-has_abad = derived["has_abad"]
-
-st.subheader("Live kinematics simulator")
-st.info("Drag the target sliders to move the paw live. FK is recomputed from the IK solution on every change.")
-sim_controls, sim_diagram, sim_readout = st.columns([1.1, 1.8, 1.1])
-with sim_controls:
-    st.markdown("**Foot target in the hip frame (mm)**")
-    max_reach = derived["max_extension"]
-    foot_x = st.slider("Drag paw fore / aft (mm)", int(-max_reach * MM), int(max_reach * MM), 0, 1) / MM
-    if has_abad:
-        foot_y = st.slider("Drag paw lateral (mm)", int(-max_reach * MM), int(max_reach * MM),
-                           int(derived["l1"] * MM), 1) / MM
-    else:
-        foot_y = 0.0
-        st.caption("8-DOF: the paw has no active lateral (Y) placement.")
-    foot_z = st.slider("Drag paw vertical (mm; down is negative)", int(-max_reach * MM), -1,
-                       int(-standing_height * MM), 1) / MM
-    knee_forward = st.toggle("Knee-forward configuration", value=True)
-    use_custom = st.toggle("Set thigh and shank lengths", value=False)
-    if use_custom:
-        thigh = mm_input("Thigh length (mm)", derived["l2"] * MM, 1, 1500)
-        shank = mm_input("Shank length (mm)", derived["l3"] * MM, 1, 1500)
-    else:
-        thigh, shank = derived["l2"], derived["l3"]
-
-jacobian_condition = None
-sol = leg_ik(foot_x, foot_y, foot_z, derived["l1"], thigh, shank, knee_forward)
-with sim_diagram:
-    if sol is None:
-        st.pyplot(plot_leg(thigh, shank, 0, 0, (foot_x, foot_y, foot_z), False), use_container_width=True)
-    else:
-        st.pyplot(plot_leg(thigh, shank, sol[1], sol[2], (foot_x, foot_y, foot_z), True), use_container_width=True)
-with sim_readout:
-    st.markdown("**Pose result**")
-    if sol is None:
-        st.error("UNREACHABLE")
-        st.caption(f"Distance must be between {abs(thigh-shank)*MM:.1f} and {(thigh+shank)*MM:.1f} mm.")
-        q_ab, q_hip, q_knee = 0.0, 0.0, 0.0
-    else:
-        q_ab, q_hip, q_knee = sol
-        st.success("REACHABLE")
-        st.metric("Hip joint", f"{np.degrees(q_hip):.1f}°")
-        st.metric("Knee joint", f"{np.degrees(q_knee):.1f}°")
+    
+    # Kinematics Simulator Layout
+    sim1, sim2 = st.columns([1, 1.2])
+    with sim1:
+        st.markdown("#### 🎮 Paw Target Displacement (Hip Frame)")
+        max_reach = derived["max_extension"]
+        
+        foot_x = st.slider("Paw fore / aft offset (mm, X)", int(-max_reach * MM), int(max_reach * MM), int(st.session_state["foot_x_mm"]), key="foot_x_slider") / MM
+        st.session_state["foot_x_mm"] = foot_x * MM
+        
         if has_abad:
-            st.metric("Hip ab/ad joint", f"{np.degrees(q_ab):.1f}°")
-        check = leg_fk(q_ab, q_hip, q_knee, derived["l1"], thigh, shank)
-        st.caption(f"FK check: {np.linalg.norm(check-np.array([foot_x, foot_y, foot_z]))*MM:.4f} mm error")
-        J = leg_jacobian(q_ab, q_hip, q_knee, derived["l1"], thigh, shank)
-        jacobian_condition = jacobian_condition_number(q_ab, q_hip, q_knee, derived["l1"], thigh, shank)
-        st.metric("Jacobian condition number", f"{jacobian_condition:.1f}")
-        if jacobian_condition > 50:
-            st.warning("Near a kinematic singularity: small foot movements can need very large joint speeds/forces.")
-        with st.expander("See the kinematics matrix"):
-            st.caption("J maps joint speed to foot speed: v = J·q̇. Its transpose maps foot force to joint torque: τ = Jᵀ·F.")
-            st.dataframe(pd.DataFrame(J, index=["x", "y", "z"], columns=["ab/ad", "hip", "knee"]).round(4))
+            foot_y = st.slider("Paw lateral offset (mm, Y)", int(-max_reach * MM), int(max_reach * MM), int(st.session_state["foot_y_mm"]), key="foot_y_slider") / MM
+            st.session_state["foot_y_mm"] = foot_y * MM
+        else:
+            foot_y = 0.0
+            st.caption("ℹ️ *8-DOF configuration: lateral leg offset (Y) is fixed.*")
+            
+        foot_z = st.slider("Paw vertical height (mm, Z; down is negative)", int(-max_reach * MM), -1, int(st.session_state["foot_z_mm"]), key="foot_z_slider") / MM
+        st.session_state["foot_z_mm"] = foot_z * MM
+        
+        knee_forward = st.toggle("Knee-forward configuration", st.session_state["knee_forward"], key="knee_forward_toggle")
+        st.session_state["knee_forward"] = knee_forward
+        
+        use_custom = st.toggle("Manually override leg link lengths", st.session_state["use_custom"], key="use_custom_toggle")
+        st.session_state["use_custom"] = use_custom
+        
+        if use_custom:
+            thigh = st.number_input("Custom Thigh length (mm)", 10.0, 1000.0, float(st.session_state["thigh_length_mm_custom"]), 1.0, key="thigh_length_custom") / MM
+            st.session_state["thigh_length_mm_custom"] = thigh * MM
+            shank = st.number_input("Custom Shank length (mm)", 10.0, 1000.0, float(st.session_state["shank_length_mm_custom"]), 1.0, key="shank_length_custom") / MM
+            st.session_state["shank_length_mm_custom"] = shank * MM
+        else:
+            thigh, shank = derived["l2"], derived["l3"]
+            
+        # Run Inverse Kinematics solver
+        sol = leg_ik(foot_x, foot_y, foot_z, derived["l1"], thigh, shank, knee_forward)
+        
+        if sol is None:
+            st.error("❌ **UNREACHABLE TARGET**: Paw placement lies outside the leg's physical workspace boundaries.")
+            q_ab, q_hip, q_knee = 0.0, 0.0, 0.0
+            jacobian_condition = 999.0
+        else:
+            q_ab, q_hip, q_knee = sol
+            st.success("✅ **REACHABLE POSTURE**")
+            
+            # Displays joint feedback
+            r1, r2, r3 = st.columns(3)
+            r1.metric("Solved Hip Ab/Ad", f"{np.degrees(q_ab):.1f}°" if has_abad else "N/A")
+            r2.metric("Solved Hip Pitch", f"{np.degrees(q_hip):.1f}°")
+            r3.metric("Solved Knee Pitch", f"{np.degrees(q_knee):.1f}°")
+            
+            check_fk = leg_fk(q_ab, q_hip, q_knee, derived["l1"], thigh, shank)
+            st.caption(f"FK check error: {np.linalg.norm(check_fk-np.array([foot_x, foot_y, foot_z]))*MM:.4f} mm")
 
-            # Manipulability index
+    with sim2:
+        if sol is not None:
+            st.pyplot(plot_leg(thigh, shank, q_hip, q_knee, (foot_x, foot_y, foot_z), True), use_container_width=True)
+        else:
+            st.pyplot(plot_leg(thigh, shank, 0, 0, (foot_x, foot_y, foot_z), False), use_container_width=True)
+            
+    st.divider()
+    
+    # Advanced kinematics diagnostics
+    dcol1, dcol2 = st.columns(2)
+    with dcol1:
+        st.markdown("#### 🌐 Reachable Workspace Bounds")
+        ws = compute_workspace_boundary(derived["l1"], thigh, shank)
+        
+        fig_ws, ax_ws = plt.subplots(figsize=(6, 4))
+        bp = np.array(ws['boundary_points'])
+        ax_ws.fill(bp[:, 0]*MM, bp[:, 1]*MM, alpha=0.15, color='dodgerblue', label='Reachable workspace')
+        ax_ws.plot(bp[:, 0]*MM, bp[:, 1]*MM, 'b-', linewidth=1.0, alpha=0.5)
+        ax_ws.plot(foot_x*MM, foot_z*MM, 'r*', markersize=12, label='Current target')
+        ax_ws.set_xlabel('X (mm, forward)')
+        ax_ws.set_ylabel('Z (mm, downward)')
+        ax_ws.set_title('Sagittal Plane Workspace')
+        ax_ws.legend(fontsize=8)
+        ax_ws.set_aspect('equal')
+        ax_ws.grid(True, alpha=0.3)
+        st.pyplot(fig_ws, use_container_width=True)
+        
+    with dcol2:
+        st.markdown("#### 🔬 Singularity & Dynamic Coupling Matrix")
+        if sol is not None:
+            J = leg_jacobian(q_ab, q_hip, q_knee, derived["l1"], thigh, shank)
+            jacobian_condition = jacobian_condition_number(q_ab, q_hip, q_knee, derived["l1"], thigh, shank)
             w_idx = manipulability_index(q_ab, q_hip, q_knee, derived["l1"], thigh, shank)
-            st.metric("Manipulability index (w)", f"{w_idx:.4f}")
-            if w_idx < 0.001:
-                st.warning("Very low manipulability — the robot can barely exert force in some directions at this pose.")
-            elif w_idx < 0.01:
-                st.info("Moderate manipulability — consider adjusting knee bend for better force distribution.")
+            
+            st.metric("Jacobian Condition Number", f"{jacobian_condition:.2f}",
+                      help="Measures directional sensitivity. Near 1 = isotropic; >50 = near singularity.")
+            st.metric("Manipulability Index (w)", f"{w_idx:.4f}",
+                      help="√det(J Jᵀ). Closer to 0 means robot loses ability to push in certain directions.")
+            
+            if jacobian_condition > 50:
+                st.warning("⚠️ Singular Pose: Small paw movements require extremely high joint speeds.")
             else:
-                st.success("Good manipulability — the robot can exert forces effectively in all directions.")
-            st.caption("w = √det(J·Jᵀ). Higher is better. Near 0 = singularity (robot loses a degree of freedom).")
+                st.success("✅ Kinematically well-conditioned posture.")
+                
+            with st.expander("Show Kinematics Jacobian Matrix J(q)"):
+                st.dataframe(pd.DataFrame(J, index=["x", "y", "z"], columns=["ab/ad", "hip", "knee"]).round(4))
+                
+            with st.expander("Show 2-Link Mass Matrix M(q)"):
+                _links_mass_est = st.session_state.get("mass_links", 0.15)
+                _thigh_m = _links_mass_est / 8
+                _shank_m = _links_mass_est / 8
+                M = compute_mass_matrix(q_hip, q_knee, _thigh_m, _shank_m, 0.5, 0.5, thigh, shank)
+                st.dataframe(pd.DataFrame(M, index=["hip", "knee"], columns=["hip", "knee"]).round(6))
+                st.caption("τ_inertia = M(q)·q̈. Diagonal represents self-inertia; off-diagonals show acceleration coupling.")
+        else:
+            st.warning("Diagnostics unavailable: foot target is outside workspace.")
 
-            # Mass matrix M(q) — uses estimated link masses
-            _est_link_mass = st.session_state.get("mass_links", 0.15)
-            _est_thigh_m = _est_link_mass / 8  # 4 legs × 2 links
-            _est_shank_m = _est_link_mass / 8
-            M = compute_mass_matrix(q_hip, q_knee, _est_thigh_m, _est_shank_m,
-                                     0.5, 0.5, thigh, shank)
-            st.markdown("**2-Link Mass Matrix M(q)**")
-            st.dataframe(pd.DataFrame(M, index=["hip", "knee"], columns=["hip", "knee"]).round(6))
-            st.caption("M(q) maps joint accelerations to inertia torques: τ_inertia = M(q)·q̈. Diagonal = self-inertia, off-diagonal = coupling.")
-
-        # Workspace boundary visualization
-        with st.expander("Workspace boundary (reachable foot positions)"):
-            ws = compute_workspace_boundary(derived["l1"], thigh, shank)
-            ws_col1, ws_col2 = st.columns([2, 1])
-            with ws_col1:
-                fig_ws, ax_ws = plt.subplots(figsize=(6, 5))
-                bp = np.array(ws['boundary_points'])
-                ax_ws.fill(bp[:, 0]*MM, bp[:, 1]*MM, alpha=0.15, color='dodgerblue', label='Reachable workspace')
-                ax_ws.plot(bp[:, 0]*MM, bp[:, 1]*MM, 'b-', linewidth=1.0, alpha=0.5)
-                # Mark current foot position
-                ax_ws.plot(foot_x*MM, foot_z*MM, 'r*', markersize=12, label=f'Current foot ({foot_x*MM:.0f}, {foot_z*MM:.0f}) mm')
-                ax_ws.set_xlabel('X (mm, forward)')
-                ax_ws.set_ylabel('Z (mm, downward = negative)')
-                ax_ws.set_title('Sagittal Plane Workspace')
-                ax_ws.legend(fontsize=8)
-                ax_ws.set_aspect('equal')
-                ax_ws.grid(True, alpha=0.3)
-                st.pyplot(fig_ws, use_container_width=True)
-            with ws_col2:
-                st.metric("Max reach", f"{ws['r_max']*MM:.1f} mm")
-                st.metric("Min reach", f"{ws['r_min']*MM:.1f} mm")
-                st.caption("Max = thigh + shank (fully extended). Min = |thigh − shank| (fully folded). Your foot target should be within this annulus.")
-
-st.divider()
-st.subheader("Kinematic dimensions")
-d1, d2, d3, d4 = st.columns(4)
-d1.metric("Body length", f"{derived['body_length']*MM:.0f} mm")
-d2.metric("Body width", f"{derived['body_width']*MM:.0f} mm")
-d3.metric("Thigh (upper leg)", f"{thigh*MM:.1f} mm")
-d4.metric("Shank (lower leg)", f"{shank*MM:.1f} mm")
-st.caption(f"Geometry model: height = √(femur² + shank² + 2·femur·shank·cos(knee bend)). At your {derived['neutral_knee_deg']:.0f}° neutral knee bend, the designed links give {standing_height*MM:.1f} mm hip height.")
-
-# ---- Motor & Servo Selection Panel (Supports Case 1 & Case 2 per leg) ----------------
-st.divider()
-st.subheader("Motor / servo selection (2 Motors Per Leg)")
-st.caption("Select motor models per joint. You can choose identical motors for all joints (Case 1) or independent Hip vs. Knee motors (Case 2).")
-
-motor_mode_name = st.radio(
-    "Motor Selection Mode",
-    [
-        "Case 1: Same Motor Model for All Joints (Both Hip & Knee identical)",
-        "Case 2: Independent Motors per Joint (Higher spec Hip, Lower spec Knee)"
-    ],
-    index=0,
-    horizontal=True,
-    help="• Case 1: Uses the same motor model for both Hip and Knee joints.\n• Case 2: Allows picking different motor models for Hip vs Knee joints."
-)
-motor_mode = "same" if motor_mode_name.startswith("Case 1") else "independent"
-
-if motor_mode == "same":
-    servo_preset_name = st.selectbox(
-        "Select Servo / Motor Model (All Joints)",
-        list(SERVO_PRESETS.keys()), index=2,
-        help="Select motor model applied to both Hip and Knee joints."
+# =========================================================================================
+# TAB 2: ACTUATORS & TORQUE BUDGET
+# =========================================================================================
+with tab_actuators:
+    st.subheader("⚙️ Joint Actuator Selection & Dynamic Torque Sizing")
+    
+    # Motor Mode Selector
+    motor_mode_name = st.radio(
+        "Servo Configuration Mode",
+        [
+            "Case 1: Same Motor Model for All Joints (Identical Hip & Knee)",
+            "Case 2: Independent Motors per Joint (Higher spec Hip, Lower spec Knee)"
+        ],
+        index=0,
+        horizontal=True,
+        help="• Case 1: Simplifies bill of materials (same servo everywhere).\n• Case 2: Optimizes weight and cost (smaller knee servo)."
     )
-    hip_preset = SERVO_PRESETS[servo_preset_name]
-    knee_preset = SERVO_PRESETS[servo_preset_name]
-    hip_preset_name = servo_preset_name
-    knee_preset_name = servo_preset_name
-else:
-    col_m1, col_m2 = st.columns(2)
-    with col_m1:
-        hip_preset_name = st.selectbox(
-            "Select Hip Joint Servo / Motor Model",
-            list(SERVO_PRESETS.keys()), index=3,  # e.g., DS3235
-            help="Select motor model for the Hip pitch joint."
+    motor_mode = "same" if motor_mode_name.startswith("Case 1") else "independent"
+    
+    # Preset selectors
+    if motor_mode == "same":
+        servo_preset_name = st.selectbox(
+            "Select Servo / Motor Preset Model (All Joints)",
+            list(SERVO_PRESETS.keys()), index=2,
+            help="Applies selected model to both Hip and Knee pitch joints."
         )
-        hip_preset = SERVO_PRESETS[hip_preset_name]
-    with col_m2:
-        knee_preset_name = st.selectbox(
-            "Select Knee Joint Servo / Motor Model",
-            list(SERVO_PRESETS.keys()), index=2,  # e.g., DS3218
-            help="Select motor model for the Knee pitch joint."
+        hip_preset = SERVO_PRESETS[servo_preset_name]
+        knee_preset = SERVO_PRESETS[servo_preset_name]
+        hip_preset_name = servo_preset_name
+        knee_preset_name = servo_preset_name
+    else:
+        mcol1, mcol2 = st.columns(2)
+        with mcol1:
+            hip_preset_name = st.selectbox(
+                "Select Hip Joint Servo Model",
+                list(SERVO_PRESETS.keys()), index=3, # e.g. DS3235
+                help="Applies model to the Hip pitch joint (carries larger lever arms)."
+            )
+            hip_preset = SERVO_PRESETS[hip_preset_name]
+        with mcol2:
+            knee_preset_name = st.selectbox(
+                "Select Knee Joint Servo Model",
+                list(SERVO_PRESETS.keys()), index=2, # e.g. DS3218
+                help="Applies model to the Knee pitch joint (carries lower mass load)."
+            )
+            knee_preset = SERVO_PRESETS[knee_preset_name]
+            
+    # Extract specs
+    hip_cont, hip_peak, hip_rpm, hip_volts, hip_curr = hip_preset["continuous_nm"], hip_preset["peak_nm"], float(hip_preset["rpm"]), hip_preset["voltage"], hip_preset["current_a"]
+    hip_avg_curr = hip_preset.get("avg_current_a", hip_curr * 0.25)
+    
+    knee_cont, knee_peak, knee_rpm, knee_volts, knee_curr = knee_preset["continuous_nm"], knee_preset["peak_nm"], float(knee_preset["rpm"]), knee_preset["voltage"], knee_preset["current_a"]
+    knee_avg_curr = knee_preset.get("avg_current_a", knee_curr * 0.25)
+    
+    # Calculate preset mass
+    if dof_total == 8:
+        preset_motor_mass_total = 4 * hip_preset["mass_kg"] + 4 * knee_preset["mass_kg"]
+    else:
+        preset_motor_mass_total = 8 * hip_preset["mass_kg"] + 4 * knee_preset["mass_kg"]
+    st.session_state["mass_motor"] = preset_motor_mass_total
+    
+    # Display catalog specifications
+    st.markdown("##### 📋 Official Datasheet Specifications:")
+    if motor_mode == "same":
+        sc1, sc2, sc3, sc4, sc5 = st.columns(5)
+        sc1.metric("Peak Stall Torque", f"{hip_peak:.2f} Nm")
+        sc2.metric("Continuous Torque", f"{hip_cont:.2f} Nm")
+        sc3.metric("No-load Rated Speed", f"{hip_rpm:.0f} RPM")
+        sc4.metric("Operating Voltage", f"{hip_volts:.1f} V")
+        sc5.metric("Stall Current", f"{hip_curr:.1f} A")
+        st.caption(f"ℹ️ **Total Actuator Mass**: {preset_motor_mass_total*1000:.0f} g for {dof_total} motors.")
+    else:
+        scc1, scc2 = st.columns(2)
+        scc1.info(f"**Hip Motor ({hip_preset_name.split(' — ')[0]})**: Peak: {hip_peak:.2f} Nm | Cont: {hip_cont:.2f} Nm | Speed: {hip_rpm:.0f} RPM | Voltage: {hip_volts:.1f}V | Stall: {hip_curr:.1f}A | Weight: {hip_preset['mass_kg']*1000:.0f}g")
+        scc2.info(f"**Knee Motor ({knee_preset_name.split(' — ')[0]})**: Peak: {knee_peak:.2f} Nm | Cont: {knee_cont:.2f} Nm | Speed: {knee_rpm:.0f} RPM | Voltage: {knee_volts:.1f}V | Stall: {knee_curr:.1f}A | Weight: {knee_preset['mass_kg']*1000:.0f}g")
+
+    st.divider()
+    
+    # Joint Torque Calculator Parameters
+    st.markdown("#### 🧮 Torque Calculator Inputs")
+    tc1, tc2, tc3, tc4 = st.columns(4)
+    with tc1:
+        stance_legs = st.selectbox(
+            "Stance legs during gait", [1, 2, 3, 4], index=1,
+            help="❓ HOW MANY FEET SHARE BODY WEIGHT SIMULTANEOUSLY:\n• 4 legs (Walk) = Lowest torque per joint\n• 2 legs (Trot) = Dynamic vertical ground force doubles\n• 1 leg = Stance leg carries full body weight."
         )
-        knee_preset = SERVO_PRESETS[knee_preset_name]
+        dynamic_accel = st.number_input(
+            "Dynamic linear acceleration (m/s²)", 0.0, 30.0, 1.0, 0.1,
+            help="❓ Extra linear pushing force when starting or stopping walking. Directly scales horizontal GRF."
+        )
+    with tc2:
+        impact_factor = st.number_input(
+            "Touchdown impact factor", 1.0, 10.0, 1.5, 0.1,
+            help="❓ Multiplier for shock force on foot strike. High values represent jumps/rough landings."
+        )
+        thigh_mass = st.number_input("Thigh link mass (kg, single leg)", 0.001, 5.0, max(st.session_state["mass_links"]/8, 0.001), 0.001)
+    with tc3:
+        shank_mass = st.number_input("Shank link mass (kg, single leg)", 0.001, 5.0, max(st.session_state["mass_links"]/8, 0.001), 0.001)
+        thigh_com = st.slider("Thigh COM (% from hip)", 0, 100, 50) / 100
+    with tc4:
+        shank_com = st.slider("Shank COM (% from knee)", 0, 100, 50) / 100
+        
+    # Recompute total mass for calculations
+    motor_mass_total = st.session_state.get("mass_motor", preset_motor_mass_total)
+    battery_mass = st.session_state.get("mass_battery", 0.20)
+    frame_mass = st.session_state.get("mass_frame", 0.25)
+    links_mass = st.session_state.get("mass_links", 0.15)
+    payload_mass = st.session_state.get("mass_payload", 0.0)
+    
+    esp32_mass, pcb_mass, sensor_mass, wiring_mass, fastener_mass = .02, .03, .03, .04, .03
+    robot_mass = motor_mass_total + battery_mass + frame_mass + links_mass + esp32_mass + pcb_mass + sensor_mass + wiring_mass + fastener_mass
+    total_system_mass = robot_mass + payload_mass
 
-# Extract official datasheet parameters for Hip and Knee
-hip_cont = hip_preset["continuous_nm"]
-hip_peak = hip_preset["peak_nm"]
-hip_rpm = float(hip_preset["rpm"])
-hip_volts = hip_preset["voltage"]
-hip_curr = hip_preset["current_a"]
-hip_avg_curr = hip_preset.get("avg_current_a", hip_curr * 0.25)
-
-knee_cont = knee_preset["continuous_nm"]
-knee_peak = knee_preset["peak_nm"]
-knee_rpm = float(knee_preset["rpm"])
-knee_volts = knee_preset["voltage"]
-knee_curr = knee_preset["current_a"]
-knee_avg_curr = knee_preset.get("avg_current_a", knee_curr * 0.25)
-
-# Calculate total motor mass dynamically based on joint selection
-if dof_total == 8:
-    # 4 legs x 1 hip motor + 4 legs x 1 knee motor
-    preset_motor_mass_total = 4 * hip_preset["mass_kg"] + 4 * knee_preset["mass_kg"]
-else:
-    # 12-DOF: 4 legs x (1 hip ab/ad + 1 hip pitch) + 4 legs x 1 knee motor
-    preset_motor_mass_total = 8 * hip_preset["mass_kg"] + 4 * knee_preset["mass_kg"]
-
-motor_mass_total = st.session_state.get("mass_motor", preset_motor_mass_total)
-battery_mass = st.session_state.get("mass_battery", 0.20)
-frame_mass = st.session_state.get("mass_frame", 0.25)
-links_mass = st.session_state.get("mass_links", 0.15)
-payload_mass = st.session_state.get("mass_payload", 0.0)
-payload_x = st.session_state.get("mass_payload_x", 0.0) / MM
-esp32_mass, pcb_mass, sensor_mass, wiring_mass, fastener_mass = .02, .03, .03, .04, .03
-
-components = {"Motors": motor_mass_total, "Battery": battery_mass, "ESP32/controller": esp32_mass,
-              "PCB": pcb_mass, "Frame": frame_mass, "Links": links_mass, "Sensors": sensor_mass,
-              "Wiring": wiring_mass, "Fasteners": fastener_mass}
-robot_mass = sum(components.values())
-total_system_mass = robot_mass + payload_mass
-
-# Official Datasheet Spec Card Display
-st.markdown("##### 📋 Selected Motor Datasheet Specifications:")
-if motor_mode == "same":
-    sc1, sc2, sc3, sc4, sc5 = st.columns(5)
-    sc1.metric("Peak Torque", f"{hip_peak:.2f} Nm")
-    sc2.metric("Continuous Torque", f"{hip_cont:.2f} Nm")
-    sc3.metric("Rated Speed", f"{hip_rpm:.0f} RPM")
-    sc4.metric("Operating Voltage", f"{hip_volts:.1f} V")
-    sc5.metric("Stall Current", f"{hip_curr:.1f} A")
-    st.caption(f"ℹ️ **Model**: {hip_preset_name.split(' — ')[0]} | Weight: {hip_preset['mass_kg']*1000:.0f} g each ({preset_motor_mass_total:.2f} kg for {dof_total} motors).")
-else:
-    mc_h, mc_k = st.columns(2)
-    with mc_h:
-        st.info(f"**Hip Motor ({hip_preset_name.split(' — ')[0]})**: Peak: {hip_peak:.2f} Nm | Cont: {hip_cont:.2f} Nm | Speed: {hip_rpm:.0f} RPM | Voltage: {hip_volts:.1f}V | Stall Curr: {hip_curr:.1f}A | Weight: {hip_preset['mass_kg']*1000:.0f}g")
-    with mc_k:
-        st.info(f"**Knee Motor ({knee_preset_name.split(' — ')[0]})**: Peak: {knee_peak:.2f} Nm | Cont: {knee_cont:.2f} Nm | Speed: {knee_rpm:.0f} RPM | Voltage: {knee_volts:.1f}V | Stall Curr: {knee_curr:.1f}A | Weight: {knee_preset['mass_kg']*1000:.0f}g")
-
-# Dual-Motor Standing Height Recommendation Engine
-_thigh_m = max(links_mass / 8, .001)
-_shank_m = max(links_mass / 8, .001)
-
-rec_max_h_mm = recommend_max_standing_height_for_motor(
-    hip_peak_nm=hip_peak, hip_cont_nm=hip_cont,
-    knee_peak_nm=knee_peak, knee_cont_nm=knee_cont,
-    dof_total=dof_total, femur_fraction=femur_fraction, neutral_knee_deg=neutral_knee_deg,
-    total_mass_kg=robot_mass, payload_kg=payload_mass, thigh_mass_kg=_thigh_m,
-    shank_mass_kg=_shank_m, stance_legs=2, dynamic_accel=1.0,
-    impact_factor=1.5, efficiency=efficiency, safety_factor=safety_factor
-)
-
-st.markdown("### 🎯 Motor Capabilities & Standing Height Recommendation")
-rc1, rc2, rc3 = st.columns(3)
-rc1.metric("Robot Total System Mass", f"{total_system_mass:.2f} kg ({total_system_mass*1000:.0f} g)")
-with rc2:
-    if rec_max_h_mm is not None:
-        st.metric("Max Safe Standing Height for Motors", f"{rec_max_h_mm} mm")
-    else:
-        st.metric("Max Safe Standing Height", "0 mm (Motors Too Weak)")
-rc3.metric("Motor Peak Torque (Hip / Knee)", f"{hip_peak:.2f} / {knee_peak:.2f} Nm")
-
-if rec_max_h_mm is None:
-    st.error(f"⛔ MOTORS TOO WEAK: The selected motor combination cannot support a 50 mm standing height for a {total_system_mass:.2f} kg robot. Upgrade Hip or Knee motor selection!")
-elif standing_height * MM > rec_max_h_mm:
-    st.error(f"⛔ CANNOT GO BEYOND THIS VALUE ({rec_max_h_mm} mm): Target standing height ({standing_height*MM:.0f} mm) exceeds the maximum safe height ({rec_max_h_mm} mm) for your selected motor combination! "
-             f"The selected motors can safely support a standing height up to **{rec_max_h_mm} mm** for a {total_system_mass:.2f} kg robot. "
-             f"Reduce standing height in the wizard to ≤ {rec_max_h_mm} mm, or select higher-torque motors.")
-else:
-    st.success(f"✅ TARGET HEIGHT OK: Your target standing height ({standing_height*MM:.0f} mm) is within the motors' safe max height limit of **{rec_max_h_mm} mm**.")
-
-# ---- Beginner-Friendly Joint Torque Calculator -------------------------------------
-st.divider()
-st.subheader("Joint torque calculator (Student-Friendly Guide)")
-st.caption("This tool calculates how much torque (twisting force) your motors need to carry the robot's weight, walk, and absorb landing impacts.")
-
-tc1, tc2, tc3, tc4 = st.columns(4)
-with tc1:
-    stance_legs = st.selectbox(
-        "Number of stance legs", [1, 2, 3, 4], index=1,
-        help="❓ HOW MANY FEET TOUCH THE GROUND TOGETHER:\n"
-             "• 4 stance legs (Walk gait) = Robot weight is shared across 4 legs (EASIEST on motors).\n"
-             "• 2 stance legs (Trot gait) = Robot weight is shared across 2 legs (DOUBLE the load per motor!).\n"
-             "• 1 stance leg (Hop/Jump) = Single leg carries whole robot.\n\n"
-             "💡 Rule of Thumb: If your motors are failing, switch to 4 stance legs or reduce robot mass."
+    # Calculate Max Safe Height recommendation for selected motor combination
+    rec_max_h_mm = recommend_max_standing_height_for_motor(
+        hip_peak_nm=hip_peak, hip_cont_nm=hip_cont,
+        knee_peak_nm=knee_peak, knee_cont_nm=knee_cont,
+        dof_total=dof_total, femur_fraction=femur_fraction, neutral_knee_deg=neutral_knee_deg,
+        total_mass_kg=robot_mass, payload_kg=payload_mass, thigh_mass_kg=thigh_mass,
+        shank_mass_kg=shank_mass, stance_legs=stance_legs, dynamic_accel=dynamic_accel,
+        impact_factor=impact_factor, efficiency=efficiency, safety_factor=safety_factor
     )
-    dynamic_accel = st.number_input(
-        "Dynamic acceleration (m/s²)", 0.0, 30.0, 1.0, .1,
-        help="❓ EXTRA PUSHING FORCE WHEN STARTING OR STOPPING:\n"
-             "• 0 m/s² = Standing completely still.\n"
-             "• 1.0–2.0 m/s² = Normal comfortable walking.\n"
-             "• >4.0 m/s² = Fast sprinting / aggressive direction changes.\n\n"
-             "💡 Increasing this value increases the required motor torque."
-    )
-with tc2:
-    impact_factor = st.number_input(
-        "Impact factor (ground hit multiplier)", 1.0, 10.0, 1.5, .1,
-        help="❓ SHOCK FORCE WHEN FOOT STRIKES THE GROUND:\n"
-             "• 1.0 = Smooth crawling with no impact.\n"
-             "• 1.5 = Normal stepping on flat floor.\n"
-             "• 2.5 = Landing from a hop or stepping onto stairs.\n\n"
-             "💡 Higher impact factor means the motor needs more PEAK STALL TORQUE to avoid collapsing on touchdown."
-    )
-    thigh_mass = st.number_input(
-        "One thigh mass (kg)", .001, 5.0, max(links_mass/8, .001), .001,
-        help="❓ WEIGHT OF ONE UPPER LEG (THIGH):\n"
-             "Lightweight 3D-printed or carbon fiber legs require much less motor torque to swing fast!"
-    )
-with tc3:
-    shank_mass = st.number_input(
-        "One shank mass (kg)", .001, 5.0, max(links_mass/8, .001), .001,
-        help="❓ WEIGHT OF ONE LOWER LEG (SHANK):\n"
-             "The lower leg moves fastest; keep it as light as possible!"
-    )
-    thigh_com = st.slider(
-        "Thigh COM from hip (% length)", 0, 100, 50,
-        help="❓ CENTER OF MASS LOCATION ALONG THIGH:\n"
-             "• 50% = Mass is evenly spread in the middle.\n"
-             "• 20% = Mass is concentrated near the top hip joint (easier to swing!)."
-    ) / 100
-with tc4:
-    shank_com = st.slider(
-        "Shank COM from knee (% length)", 0, 100, 50,
-        help="❓ CENTER OF MASS LOCATION ALONG SHANK:\n"
-             "• 50% = Mass in middle.\n"
-             "• 20% = Mass near top knee joint."
-    ) / 100
-    st.write(f"Safety Multiplier: **{safety_factor:.1f}×**")
-
-budget = joint_torque_budget(hip_flexion=q_hip, knee_flexion=q_knee, hip_abduction=q_ab,
-    hip_offset=derived["l1"], thigh_length=thigh, shank_length=shank, total_mass_kg=robot_mass,
-    payload_kg=payload_mass, thigh_mass_kg=thigh_mass, shank_mass_kg=shank_mass,
-    thigh_com_frac=thigh_com, shank_com_frac=shank_com, legs_in_stance=stance_legs,
-    dynamic_accel_mps2=dynamic_accel, impact_factor=impact_factor,
-    transmission_efficiency=efficiency, safety_factor=safety_factor)
-
-torque_table = pd.DataFrame({name: {"Hip joint": vals["hip_nm"], "Knee joint": vals["knee_nm"]}
-                             for name, vals in budget.items()
-                             if isinstance(vals, dict) and "hip_nm" in vals}).round(2)
-st.dataframe(torque_table, use_container_width=True)
-
-# Evaluate Motor Verdicts (Hip Motor evaluated against Hip budget, Knee Motor evaluated against Knee budget)
-eval_hip = evaluate_motor(
-    motor_continuous_nm=hip_cont, motor_peak_nm=hip_peak,
-    motor_rated_rpm=hip_rpm, gearbox_ratio=1.0,
-    transmission_efficiency=efficiency,
-    required_continuous_nm=budget["continuous_required"]["hip_nm"],
-    required_peak_nm=budget["peak_required"]["hip_nm"],
-    required_max_speed_rad_s=4.0,
-    rating_basis="Servo output shaft (already geared)"
-)
-
-eval_knee = evaluate_motor(
-    motor_continuous_nm=knee_cont, motor_peak_nm=knee_peak,
-    motor_rated_rpm=knee_rpm, gearbox_ratio=1.0,
-    transmission_efficiency=efficiency,
-    required_continuous_nm=budget["continuous_required"]["knee_nm"],
-    required_peak_nm=budget["peak_required"]["knee_nm"],
-    required_max_speed_rad_s=4.0,
-    rating_basis="Servo output shaft (already geared)"
-)
-
-evals = {"Hip joint": eval_hip, "Knee joint": eval_knee}
-
-for name, result in evals.items():
-    if result['verdict'] == "FAIL":
-        st.error(f"❌ **{name}: `FAIL`** — " + " ".join(result["reasons"]))
-    elif result['verdict'] == "MARGINAL":
-        st.warning(f"⚠️ **{name}: `MARGINAL`** — " + " ".join(result["reasons"]))
-    else:
-        st.success(f"✅ **{name}: `PASS`** — " + " ".join(result["reasons"]))
-
-# ---- Smart Automatic Battery & Power Recommender -----------------------------------
-st.divider()
-st.subheader("Smart Servo Power & Battery Recommender")
-st.caption("Automatically computes ideal battery capacity, voltage, and discharge C-rating based on electrical specs of selected Hip & Knee motors.")
-
-bc1, bc2 = st.columns(2)
-with bc1:
-    target_runtime_min = st.slider("Desired walking runtime (minutes)", 5, 120, 20, 5,
-                                   help="How long you want the robot to walk on a single battery charge.")
-    battery_type = st.selectbox(
-        "Battery chemistry preference",
-        ["LiPo (Lithium Polymer) — High performance, light", "Li-ion 18650 — Good runtime, standard", "NiMH / External Power Supply"],
-        index=0
-    )
-with bc2:
-    target_volts = max(hip_volts, knee_volts)
-    st.markdown(f"**Electrical Profile ({dof_total} Servos):**")
-    st.write(f"• Hip Motor Voltage: **{hip_volts:.1f} V** | Stall Curr: **{hip_curr:.1f} A**")
-    st.write(f"• Knee Motor Voltage: **{knee_volts:.1f} V** | Stall Curr: **{knee_curr:.1f} A**")
-
-# Calculate Dual Motor Battery Requirements
-if dof_total == 8:
-    num_hip = 4
-    num_knee = 4
-else:
-    num_hip = 8
-    num_knee = 4
-
-total_avg_current = (num_hip * 0.5 * hip_avg_curr) + (num_knee * 0.5 * knee_avg_curr) + 0.35
-total_peak_current = (num_hip * hip_curr) + (num_knee * knee_curr) + 0.35
-
-req_capacity_mah = int(np.ceil((total_avg_current * (target_runtime_min / 60.0) / 0.80) * 1000 / 100) * 100)
-req_c_rating = int(np.ceil(total_peak_current / (req_capacity_mah / 1000.0)))
-
-lipo_cells = "2S (7.4V)" if target_volts <= 7.4 else ("3S (11.1V)" if target_volts <= 11.1 else "4S (14.8V)")
-
-st.markdown("#### 🔋 Recommended Battery Specification:")
-bp1, bp2, bp3, bp4 = st.columns(4)
-bp1.metric("Recommended Voltage", f"{target_volts:.1f} V ({lipo_cells})")
-bp2.metric("Min Battery Capacity", f"{req_capacity_mah} mAh")
-bp3.metric("Min Discharge C-Rating", f"{req_c_rating}C or higher")
-bp4.metric("Peak Current Draw", f"{total_peak_current:.1f} A")
-
-st.info(f"💡 **Shopping Recommendation**: Buy a **{lipo_cells} {req_capacity_mah} mAh LiPo Battery with at least {req_c_rating}C discharge rating**. "
-        f"For {dof_total} servos, use a dedicated fused UBEC power distribution board rated for at least **{total_peak_current*0.75:.0f}A continuous**.")
-
-# ---- 2D Stair-climbing simulation --------------------------------------------------
-st.divider()
-st.subheader("2D stair-climbing and descending simulation")
-st.caption("Sagittal-plane leg check for a single normal stair. It tests the requested paw landing against reach and joint-angle limits.")
-stair1, stair2, stair3, stair4 = st.columns(4)
-with stair1:
-    riser = mm_input("Stair riser height (mm)", 175, 1, 500, 1)
-    tread = mm_input("Stair tread depth (mm)", 280, 10, 600, 1)
-with stair2:
-    landing_x = mm_input("Paw landing beyond riser (mm)", 180, 1, 1000, 1)
-    stair_direction = st.radio("Test direction", ["Climb", "Descend"], horizontal=True)
-with stair3:
-    hip_min = st.number_input("Hip joint minimum (°)", -180.0, 0.0, -90.0, 1.0)
-    hip_max = st.number_input("Hip joint maximum (°)", 0.0, 180.0, 90.0, 1.0)
-with stair4:
-    knee_min = st.number_input("Knee joint minimum (°)", -180.0, 180.0, 0.0, 1.0)
-    knee_max = st.number_input("Knee joint maximum (°)", -180.0, 180.0, 150.0, 1.0)
-
-stair_z = -standing_height + riser if stair_direction == "Climb" else -standing_height - riser
-stair_target = (landing_x, 0.0, stair_z)
-stair_sol, stair_issues = assess_stair_target(stair_target, thigh, shank, derived["l1"],
-                                               knee_forward, hip_min, hip_max, knee_min, knee_max)
-stair_status, stair_figure = st.columns([1, 2])
-with stair_status:
-    if stair_sol is None:
-        st.error(f"{stair_direction.upper()}: NOT REACHABLE")
-    elif stair_issues:
-        st.warning(f"{stair_direction.upper()}: REACHABLE, BUT JOINT-LIMIT FAILURE")
-    else:
-        st.success(f"{stair_direction.upper()}: KINEMATICALLY FEASIBLE")
-    if stair_sol is not None:
-        _, stair_hip, stair_knee = stair_sol
-        st.metric("Hip joint on stair", f"{np.degrees(stair_hip):.1f}°")
-        st.metric("Knee joint on stair", f"{np.degrees(stair_knee):.1f}°")
-    for issue in stair_issues:
-        st.write(f"• {issue}")
-    feasible_risers = []
-    for candidate_mm in range(10, 501, 5):
-        candidate_r = candidate_mm / MM
-        candidate_z = -standing_height + candidate_r if stair_direction == "Climb" else -standing_height - candidate_r
-        _, candidate_issues = assess_stair_target((landing_x, 0.0, candidate_z), thigh, shank,
-                                                   derived["l1"], knee_forward, hip_min, hip_max,
-                                                   knee_min, knee_max)
-        if not candidate_issues:
-            feasible_risers.append(candidate_mm)
-    if feasible_risers:
-        max_riser = max(feasible_risers)
-        st.info(f"{stair_direction} recommendation: maximum kinematic riser here is about {max_riser} mm.")
-with stair_figure:
-    if stair_sol is None:
-        st.pyplot(stair_pose(thigh, shank, 0, 0, stair_target, standing_height, riser, tread,
-                              stair_direction, False), use_container_width=True)
-    else:
-        st.pyplot(stair_pose(thigh, shank, stair_sol[1], stair_sol[2], stair_target,
-                              standing_height, riser, tread, stair_direction, True), use_container_width=True)
-
-# Stair-climb torque analysis
-if stair_sol is not None and stair_direction == "Climb":
-    st.subheader("Stair-climb torque analysis")
-    stair_torque = stair_climb_torque_budget(
-        hip_flexion_flat=q_hip, knee_flexion_flat=q_knee,
-        hip_flexion_stair=stair_sol[1], knee_flexion_stair=stair_sol[2],
-        hip_abduction=q_ab, hip_offset=derived["l1"],
-        thigh_length=thigh, shank_length=shank,
+    
+    # Run budget check
+    budget = joint_torque_budget(
+        hip_flexion=q_hip, knee_flexion=q_knee, hip_abduction=q_ab,
+        hip_offset=derived["l1"], thigh_length=thigh, shank_length=shank,
         total_mass_kg=robot_mass, payload_kg=payload_mass,
         thigh_mass_kg=thigh_mass, shank_mass_kg=shank_mass,
         thigh_com_frac=thigh_com, shank_com_frac=shank_com,
-        riser_height_m=riser, transmission_efficiency=efficiency,
-        safety_factor=safety_factor)
-    st1, st2, st3, st4 = st.columns(4)
-    st1.metric("Climb leg hip", f"{stair_torque['stair_leg_hip_nm']:.2f} Nm")
-    st2.metric("Climb leg knee", f"{stair_torque['stair_leg_knee_nm']:.2f} Nm")
-    st3.metric("Support leg hip", f"{stair_torque['support_leg_hip_nm']:.2f} Nm")
-    st4.metric("Support leg knee", f"{stair_torque['support_leg_knee_nm']:.2f} Nm")
-    sc1, sc2 = st.columns(2)
-    sc1.metric("Energy per step", f"{stair_torque['climb_energy_j']:.2f} J")
-    sc2.metric("Min motor peak required", f"{stair_torque['min_motor_peak_nm']:.2f} Nm")
+        legs_in_stance=stance_legs, dynamic_accel_mps2=dynamic_accel,
+        impact_factor=impact_factor, transmission_efficiency=efficiency,
+        safety_factor=safety_factor
+    )
+    
+    st.markdown("#### 📊 Calculated Torque Budget Table")
+    torque_table = pd.DataFrame({name: {"Hip joint (Nm)": vals["hip_nm"], "Knee joint (Nm)": vals["knee_nm"], "Ab/Ad joint (Nm)": vals["abad_nm"]}
+                                 for name, vals in budget.items()
+                                 if isinstance(vals, dict) and "hip_nm" in vals}).round(2)
+    st.dataframe(torque_table, use_container_width=True)
+    
+    # Motor verdicts
+    eval_hip = evaluate_motor(
+        motor_continuous_nm=hip_cont, motor_peak_nm=hip_peak,
+        motor_rated_rpm=hip_rpm, gearbox_ratio=1.0,
+        transmission_efficiency=efficiency,
+        required_continuous_nm=budget["continuous_required"]["hip_nm"],
+        required_peak_nm=budget["peak_required"]["hip_nm"],
+        required_max_speed_rad_s=4.0,
+        rating_basis="Servo output shaft (already geared)"
+    )
+    eval_knee = evaluate_motor(
+        motor_continuous_nm=knee_cont, motor_peak_nm=knee_peak,
+        motor_rated_rpm=knee_rpm, gearbox_ratio=1.0,
+        transmission_efficiency=efficiency,
+        required_continuous_nm=budget["continuous_required"]["knee_nm"],
+        required_peak_nm=budget["peak_required"]["knee_nm"],
+        required_max_speed_rad_s=4.0,
+        rating_basis="Servo output shaft (already geared)"
+    )
+    
+    st.markdown("##### 🔍 Sizing Verdicts:")
+    vcol1, vcol2 = st.columns(2)
+    with vcol1:
+        if eval_hip['verdict'] == "FAIL":
+            st.error(f"❌ **Hip Pitch Joint: FAIL** — " + " ".join(eval_hip["reasons"]))
+        elif eval_hip['verdict'] == "MARGINAL":
+            st.warning(f"⚠️ **Hip Pitch Joint: MARGINAL** — " + " ".join(eval_hip["reasons"]))
+        else:
+            st.success(f"✅ **Hip Pitch Joint: PASS** — " + " ".join(eval_hip["reasons"]))
+    with vcol2:
+        if eval_knee['verdict'] == "FAIL":
+            st.error(f"❌ **Knee Pitch Joint: FAIL** — " + " ".join(eval_knee["reasons"]))
+        elif eval_knee['verdict'] == "MARGINAL":
+            st.warning(f"⚠️ **Knee Pitch Joint: MARGINAL** — " + " ".join(eval_knee["reasons"]))
+        else:
+            st.success(f"✅ **Knee Pitch Joint: PASS** — " + " ".join(eval_knee["reasons"]))
+            
+    # Motor height recommendation card
+    st.markdown("##### 🎯 Standing Height Limits:")
+    if rec_max_h_mm is not None:
+        if standing_height * MM > rec_max_h_mm:
+            st.error(f"⚠️ **Overextended height**: Your target standing height ({standing_height*MM:.0f} mm) exceeds the maximum safe height of **{rec_max_h_mm} mm** for these motors.")
+        else:
+            st.success(f"✅ **Standing Height Valid**: Target height ({standing_height*MM:.0f} mm) is within the safe limit of **{rec_max_h_mm} mm**.")
+    else:
+        st.error("⛔ Selected motors are too weak to support standing at any height!")
 
-# ---- Gait Recommendation Engine ------------------------------------------------
-st.divider()
-st.subheader("Gait Recommendation Engine")
-st.caption("Evaluates which gaits your selected motors can handle, and provides a safety margin if you haven't decided on a gait yet.")
+    with st.expander("🛠️ Show Dynamic Test Cases (Walking, Trotting, Crouch, Land)"):
+        st.caption("Standard operational test configurations evaluated on the fly.")
+        TESTS = {"Standing": (4, 0.0, 1.0), "Crouching": (4, .5, 1.1), "Walking": (3, 1.0, 1.3), "Trotting": (2, 2.0, 1.7), "Acceleration": (2, 4.0, 1.5), "Stopping": (2, 4.0, 1.5), "Slope standing": (3, 1.5, 1.2), "One-leg disturbance": (3, 3.0, 1.8), "Landing / impact": (2, 3.0, 2.5)}
+        rows = []
+        for name, (legs, accel, impact) in TESTS.items():
+            test = joint_torque_budget(hip_flexion=q_hip, knee_flexion=q_knee, hip_abduction=q_ab, hip_offset=derived["l1"], thigh_length=thigh, shank_length=shank, total_mass_kg=robot_mass, payload_kg=payload_mass, thigh_mass_kg=thigh_mass, shank_mass_kg=shank_mass, thigh_com_frac=thigh_com, shank_com_frac=shank_com, legs_in_stance=legs, dynamic_accel_mps2=accel, impact_factor=impact, transmission_efficiency=efficiency, safety_factor=safety_factor)
+            rows.append({"Test Case": name, "Stance Legs": legs, "Hip Peak Required (Nm)": round(test["peak_required"]["hip_nm"], 2), "Knee Peak Required (Nm)": round(test["peak_required"]["knee_nm"], 2)})
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
-gait_decided = st.radio(
-    "Have you decided which gait to use?",
-    ["Not yet — show me the undecided-gait safety margin",
-     "Yes — I know which gait I want"],
-    index=0,
-    horizontal=True,
-    help="❓ If you haven't decided yet, we'll evaluate your motors against the WORST-CASE torque demand across ALL gaits. "
-         "If your motors pass this, you're safe no matter which gait you choose later."
-)
+    with st.expander("🧗 2D Stair Climbing Feasibility Checker"):
+        stair_col1, stair_col2 = st.columns(2)
+        with stair_col1:
+            riser = mm_input("Stair riser height (mm)", 175.0, 10.0, 500.0, 5.0, key="riser_stair_val")
+            tread = mm_input("Stair tread depth (mm)", 280.0, 50.0, 600.0, 5.0, key="tread_stair_val")
+            landing_x = mm_input("Paw landing fore/aft offset beyond riser (mm)", 180.0, 10.0, 800.0, 5.0)
+            stair_direction = st.radio("Ascent / Descent Direction", ["Climb", "Descend"], horizontal=True)
+        with stair_col2:
+            hip_min = st.number_input("Hip joint lower limit (°)", -180.0, 0.0, -90.0, 5.0)
+            hip_max = st.number_input("Hip joint upper limit (°)", 0.0, 180.0, 90.0, 5.0)
+            knee_min = st.number_input("Knee joint lower limit (°)", -180.0, 0.0, -90.0, 5.0)
+            knee_max = st.number_input("Knee joint upper limit (°)", 0.0, 180.0, 90.0, 5.0)
 
-target_speed = st.slider("Target walking speed (m/s)", 0.05, 2.0, 0.3, 0.05,
-                         help="❓ How fast do you want the robot to walk?\n"
-                              "• 0.1–0.3 m/s = Slow walk (easy on motors)\n"
-                              "• 0.3–0.8 m/s = Normal walking\n"
-                              "• 0.8–2.0 m/s = Fast trot / running (needs powerful motors)")
+        stair_target = (landing_x, derived["l1"], -standing_height + (riser if stair_direction == "Climb" else -riser))
+        stair_sol, stair_issues = assess_stair_target(stair_target, thigh, shank, derived["l1"], knee_forward, hip_min, hip_max, knee_min, knee_max)
+        
+        sc1, sc2 = st.columns([1.2, 1])
+        with sc1:
+            fig_stair = stair_pose(thigh, shank, stair_sol[1] if stair_sol else 0.0, stair_sol[2] if stair_sol else 0.0, stair_target, standing_height, riser, tread, stair_direction, stair_sol is not None)
+            st.pyplot(fig_stair, use_container_width=True)
+        with sc2:
+            if stair_sol is None:
+                st.error("❌ **STAIR COLLISION / OUT OF REACH**: Joint limits or geometry bounds violated.")
+                for iss in stair_issues:
+                    st.write(f"- {iss}")
+            else:
+                st.success("✅ **STAIR REACHABLE**")
+                stair_torque = stair_climb_torque_budget(
+                    hip_flexion_flat=q_hip, knee_flexion_flat=q_knee,
+                    hip_flexion_stair=stair_sol[1], knee_flexion_stair=stair_sol[2],
+                    hip_abduction=q_ab, hip_offset=derived["l1"],
+                    thigh_length=thigh, shank_length=shank,
+                    total_mass_kg=robot_mass, payload_kg=payload_mass,
+                    thigh_mass_kg=thigh_mass, shank_mass_kg=shank_mass,
+                    thigh_com_frac=thigh_com, shank_com_frac=shank_com,
+                    riser_height_m=riser, transmission_efficiency=efficiency,
+                    safety_factor=safety_factor
+                )
+                st.metric("Stair Leg Hip Peak (Nm)", f"{stair_torque['stair_leg_hip_nm']:.2f} Nm")
+                st.metric("Stair Leg Knee Peak (Nm)", f"{stair_torque['stair_leg_knee_nm']:.2f} Nm")
 
-if gait_decided.startswith("Not yet"):
-    # Undecided gait mode: worst-case analysis
-    wcm = worst_case_gait_margin(
+# =========================================================================================
+# TAB 3: GAITS & TORQUE-SPEED OPERATING POINTS
+# =========================================================================================
+with tab_gaits:
+    st.subheader("🏃 Dynamic Gait Sizing & Torque-Speed Operating Points")
+    
+    # Target Speed & Gait Settings
+    gcol1, gcol2 = st.columns(2)
+    with gcol1:
+        gait_decided = st.radio(
+            "Have you decided on which walking/trotting gait to use?",
+            ["Not yet — show me the undecided-gait safety margin",
+             "Yes — I know which gait I want to use"],
+            index=0,
+            help="If undecided, the system guarantees safety by testing against the absolute worst-case torque gait."
+        )
+    with gcol2:
+        target_speed = st.slider("Target walking speed (m/s)", 0.05, 2.0, 0.3, 0.05,
+                                 help="Required operational speed. Faster speeds increase dynamic inertia and joint velocities.")
+        
+    st.divider()
+    
+    # Gait recommendations evaluation
+    gait_recs = recommend_gait(
         hip_peak_nm=hip_peak, knee_peak_nm=knee_peak,
         hip_cont_nm=hip_cont, knee_cont_nm=knee_cont,
         robot_mass_kg=robot_mass, payload_kg=payload_mass,
         standing_height_m=standing_height,
         thigh_length=thigh, shank_length=shank,
         hip_offset=derived["l1"],
-        target_speed_mps=target_speed,
+        target_speed_mps=target_speed, terrain=terrain,
         efficiency=efficiency, safety_factor=safety_factor,
         thigh_mass_kg=thigh_mass, shank_mass_kg=shank_mass
     )
 
-    if wcm['undecided_safe']:
-        st.success(f"✅ **SAFE for ANY gait!** Your motors can handle the worst-case scenario "
-                   f"(**{wcm['worst_gait_name']}** gait). "
-                   f"Hip margin: **{wcm['hip_margin_pct']:.0f}%** | Knee margin: **{wcm['knee_margin_pct']:.0f}%**")
-        st.caption("You can decide on any gait later without worrying about motor limits.")
-    else:
-        st.error(f"⚠️ **NOT safe for all gaits.** The worst-case gait (**{wcm['worst_gait_name']}**) "
-                 f"exceeds your motor capacity. "
-                 f"Hip margin: **{wcm['hip_margin_pct']:.0f}%** | Knee margin: **{wcm['knee_margin_pct']:.0f}%**")
-        st.caption("Some gaits will work, but not all. See the table below for which gaits are feasible.")
-
-    wcm_col1, wcm_col2 = st.columns(2)
-    with wcm_col1:
-        st.metric("Worst-case hip peak torque", f"{wcm['worst_hip_peak']:.2f} Nm")
-        st.metric("Worst-case knee peak torque", f"{wcm['worst_knee_peak']:.2f} Nm")
-    with wcm_col2:
-        st.metric("Worst-case hip continuous torque", f"{wcm['worst_hip_cont']:.2f} Nm")
-        st.metric("Worst-case knee continuous torque", f"{wcm['worst_knee_cont']:.2f} Nm")
-
-# Always show the full gait comparison table
-st.markdown("**All Gaits — Feasibility Analysis**")
-gait_recs = recommend_gait(
-    hip_peak_nm=hip_peak, knee_peak_nm=knee_peak,
-    hip_cont_nm=hip_cont, knee_cont_nm=knee_cont,
-    robot_mass_kg=robot_mass, payload_kg=payload_mass,
-    standing_height_m=standing_height,
-    thigh_length=thigh, shank_length=shank,
-    hip_offset=derived["l1"],
-    target_speed_mps=target_speed, terrain=terrain,
-    efficiency=efficiency, safety_factor=safety_factor,
-    thigh_mass_kg=thigh_mass, shank_mass_kg=shank_mass
-)
-
-gait_rows = []
-for rec in gait_recs:
-    status = "✅ PASS" if rec['feasible'] else "❌ FAIL"
-    gait_rows.append({
-        "Gait": rec['gait'],
-        "Status": status,
-        "Duty Factor": f"{rec['duty_factor']:.2f}",
-        "Min Stance Legs": rec['min_stance_legs'],
-        "Hip Margin": f"{rec['hip_margin_pct']:.0f}%",
-        "Knee Margin": f"{rec['knee_margin_pct']:.0f}%",
-        "Speed Fit": rec.get('speed_suitability', 'N/A'),
-        "Terrain Fit": rec.get('terrain_suitability', 'N/A'),
-        "Notes": rec.get('recommendation', '')
-    })
-st.dataframe(pd.DataFrame(gait_rows), use_container_width=True, hide_index=True)
-
-if gait_decided.startswith("Yes"):
-    selected_gait = st.selectbox("Select your gait", list(GAITS.keys()), index=2,
-                                  help="Choose the gait you plan to implement.")
-    matching = [r for r in gait_recs if r['gait'] == selected_gait]
-    if matching:
-        sel = matching[0]
-        if sel['feasible']:
-            st.success(f"✅ **{selected_gait}** gait is feasible! Hip margin: {sel['hip_margin_pct']:.0f}% | Knee margin: {sel['knee_margin_pct']:.0f}%")
+    if gait_decided.startswith("Not yet"):
+        wcm = worst_case_gait_margin(
+            hip_peak_nm=hip_peak, knee_peak_nm=knee_peak,
+            hip_cont_nm=hip_cont, knee_cont_nm=knee_cont,
+            robot_mass_kg=robot_mass, payload_kg=payload_mass,
+            standing_height_m=standing_height,
+            thigh_length=thigh, shank_length=shank,
+            hip_offset=derived["l1"],
+            target_speed_mps=target_speed,
+            efficiency=efficiency, safety_factor=safety_factor,
+            thigh_mass_kg=thigh_mass, shank_mass_kg=shank_mass
+        )
+        if wcm['undecided_safe']:
+            st.success(f"✅ **SAFE FOR ALL GAITS**: Your motors can handle the worst-case gait (**{wcm['worst_gait_name']}**). Hip margin: {wcm['hip_margin_pct']:.0f}% | Knee margin: {wcm['knee_margin_pct']:.0f}%.")
         else:
-            st.error(f"❌ **{selected_gait}** gait exceeds motor capacity. Hip margin: {sel['hip_margin_pct']:.0f}% | Knee margin: {sel['knee_margin_pct']:.0f}%. Consider a stronger motor or lighter robot.")
+            st.error(f"❌ **NOT SAFE FOR ALL GAITS**: The worst-case gait (**{wcm['worst_gait_name']}**) exceeds your motor capacities. Hip margin: {wcm['hip_margin_pct']:.0f}% | Knee margin: {wcm['knee_margin_pct']:.0f}%.")
 
-# ---- Motor Operating Point Analysis -----------------------------------------------
-st.divider()
-st.subheader("Motor Torque-Speed Operating Point")
-st.caption("Real DC motors lose torque as speed increases. This shows where your motor operates on its torque-speed curve during the selected gait.")
-
-# Estimate joint speeds from gait
-selected_gait_for_speed = list(GAITS.keys())[2]  # Default: Trot
-gait_period = 0.6  # Default gait period
-step_length_m = target_speed * gait_period * GAITS[selected_gait_for_speed]['duty_factor']
-step_height_m = 0.03
-joint_speed_est = estimate_max_joint_speed(
-    step_length_m=step_length_m, step_height_m=step_height_m,
-    period_s=gait_period,
-    duty_factor=GAITS[selected_gait_for_speed]['duty_factor'],
-    thigh_length=thigh, shank_length=shank,
-    standing_height_m=standing_height, hip_offset=derived["l1"]
-)
-
-op_col1, op_col2 = st.columns(2)
-with op_col1:
-    st.markdown(f"**Hip Motor ({hip_preset_name})**")
+    # Display gait table
+    st.markdown("##### 🏃 Gait Feasibility Comparison:")
+    gait_rows = []
+    for rec in gait_recs:
+        gait_rows.append({
+            "Gait Mode": rec['gait'],
+            "Status": "✅ PASS" if rec['feasible'] else "❌ FAIL",
+            "Duty Factor": f"{rec['duty_factor']:.2f}",
+            "Min Stance Legs": rec['min_stance_legs'],
+            "Hip Margin": f"{rec['hip_margin_pct']:.0f}%",
+            "Knee Margin": f"{rec['knee_margin_pct']:.0f}%",
+            "Speed Fit": rec.get('speed_suitability', 'N/A'),
+            "Terrain Fit": rec.get('terrain_suitability', 'N/A'),
+        })
+    st.dataframe(pd.DataFrame(gait_rows), use_container_width=True, hide_index=True)
+    
+    if gait_decided.startswith("Yes"):
+        selected_gait = st.selectbox("Select your active design gait", list(GAITS.keys()), index=2)
+    else:
+        selected_gait = "Trot"
+        
+    st.divider()
+    
+    # Torque-Speed Operating Points
+    st.markdown("#### 📈 Motor Torque-Speed Operating Point Verification")
+    st.caption("Real DC motors lose torque output linearly as angular velocity increases. Below we verify if your operating points fall within safe curves.")
+    
+    # Estimate joint speeds from gait
+    gait_period = 0.6
+    step_length_m = target_speed * gait_period * GAITS[selected_gait]['duty_factor']
+    step_height_m = 0.03
+    joint_speed_est = estimate_max_joint_speed(
+        step_length_m=step_length_m, step_height_m=step_height_m,
+        period_s=gait_period, duty_factor=GAITS[selected_gait]['duty_factor'],
+        thigh_length=thigh, shank_length=shank,
+        standing_height_m=standing_height, hip_offset=derived["l1"]
+    )
+    
     hip_op = motor_operating_point(
-        motor_peak_nm=hip_peak, motor_cont_nm=hip_cont,
-        motor_rpm=hip_rpm,
+        motor_peak_nm=hip_peak, motor_cont_nm=hip_cont, motor_rpm=hip_rpm,
         required_torque_nm=budget['continuous_required']['hip_nm'],
         required_speed_rad_s=joint_speed_est.get('peak_hip_rad_s', 2.0)
     )
-    st.metric("Torque available at gait speed", f"{hip_op['torque_available_at_speed']:.2f} Nm")
-    st.metric("Speed utilization", f"{hip_op['speed_pct']:.0f}%")
-    st.metric("Torque utilization", f"{hip_op['torque_pct']:.0f}%")
-    if hip_op.get('thermal_warning'):
-        st.warning(f"🔥 {hip_op['thermal_warning']}")
-    elif hip_op['in_continuous_region']:
-        st.success("✅ Operating within continuous thermal region.")
-    else:
-        st.warning("⚠️ Operating in intermittent/peak region — risk of overheating.")
-
-with op_col2:
-    st.markdown(f"**Knee Motor ({knee_preset_name})**")
     knee_op = motor_operating_point(
-        motor_peak_nm=knee_peak, motor_cont_nm=knee_cont,
-        motor_rpm=knee_rpm,
+        motor_peak_nm=knee_peak, motor_cont_nm=knee_cont, motor_rpm=knee_rpm,
         required_torque_nm=budget['continuous_required']['knee_nm'],
         required_speed_rad_s=joint_speed_est.get('peak_knee_rad_s', 2.0)
     )
-    st.metric("Torque available at gait speed", f"{knee_op['torque_available_at_speed']:.2f} Nm")
-    st.metric("Speed utilization", f"{knee_op['speed_pct']:.0f}%")
-    st.metric("Torque utilization", f"{knee_op['torque_pct']:.0f}%")
-    if knee_op.get('thermal_warning'):
-        st.warning(f"🔥 {knee_op['thermal_warning']}")
-    elif knee_op['in_continuous_region']:
-        st.success("✅ Operating within continuous thermal region.")
-    else:
-        st.warning("⚠️ Operating in intermittent/peak region — risk of overheating.")
+    
+    col_op1, col_op2 = st.columns(2)
+    with col_op1:
+        st.markdown(f"**Hip Joint ({hip_preset_name.split(' — ')[0]})**")
+        st.write(f"• Torque Available at Speed: **{hip_op['torque_available_at_speed']:.2f} Nm**")
+        st.write(f"• Speed Utilization: **{hip_op['speed_pct']:.0f}%**")
+        st.write(f"• Torque Utilization: **{hip_op['torque_pct']:.0f}%**")
+        if hip_op.get('thermal_warning'):
+            st.warning(f"🔥 {hip_op['thermal_warning']}")
+        elif hip_op['in_continuous_region']:
+            st.success("✅ Operating within continuous thermal region.")
+        else:
+            st.warning("⚠️ Operating in peak region (Intermittent duty only).")
+            
+    with col_op2:
+        st.markdown(f"**Knee Joint ({knee_preset_name.split(' — ')[0]})**")
+        st.write(f"• Torque Available at Speed: **{knee_op['torque_available_at_speed']:.2f} Nm**")
+        st.write(f"• Speed Utilization: **{knee_op['speed_pct']:.0f}%**")
+        st.write(f"• Torque Utilization: **{knee_op['torque_pct']:.0f}%**")
+        if knee_op.get('thermal_warning'):
+            st.warning(f"🔥 {knee_op['thermal_warning']}")
+        elif knee_op['in_continuous_region']:
+            st.success("✅ Operating within continuous thermal region.")
+        else:
+            st.warning("⚠️ Operating in peak region (Intermittent duty only).")
+            
+    # Curves plot
+    fig_ts, (ax_h, ax_k) = plt.subplots(1, 2, figsize=(12, 4.2))
+    for ax, label, peak, cont, rpm, req_t, req_s in [
+        (ax_h, f"Hip ({hip_preset_name.split(' — ')[0]})", hip_peak, hip_cont, hip_rpm,
+         budget['continuous_required']['hip_nm'], joint_speed_est.get('peak_hip_rad_s', 2.0)),
+        (ax_k, f"Knee ({knee_preset_name.split(' — ')[0]})", knee_peak, knee_cont, knee_rpm,
+         budget['continuous_required']['knee_nm'], joint_speed_est.get('peak_knee_rad_s', 2.0))
+    ]:
+        omega_nl = rpm * 2 * np.pi / 60
+        speeds = np.linspace(0, omega_nl, 100)
+        torques = peak * (1 - speeds / omega_nl)
+        ax.fill_between(speeds, 0, np.minimum(torques, cont), alpha=0.2, color='green', label='Continuous Region')
+        ax.fill_between(speeds, cont, torques, where=torques > cont, alpha=0.15, color='orange', label='Peak Region')
+        ax.plot(speeds, torques, 'b-', lw=2, label='T-ω Curve')
+        ax.axhline(y=cont, color='green', ls='--', alpha=0.6, label='Cont. Limit')
+        ax.plot(req_s, req_t, 'r*', ms=12, label='Operating Point')
+        ax.set_xlabel('Joint speed (rad/s)')
+        ax.set_ylabel('Torque (Nm)')
+        ax.set_title(label)
+        ax.legend(fontsize=7)
+        ax.grid(True, alpha=0.3)
+    fig_ts.tight_layout()
+    st.pyplot(fig_ts, use_container_width=True)
 
-# Torque-speed curve plot
-fig_ts, (ax_h, ax_k) = plt.subplots(1, 2, figsize=(12, 4))
-for ax, label, peak, cont, rpm, req_t, req_s in [
-    (ax_h, f"Hip ({hip_preset_name})", hip_peak, hip_cont, hip_rpm,
-     budget['continuous_required']['hip_nm'], joint_speed_est.get('peak_hip_rad_s', 2.0)),
-    (ax_k, f"Knee ({knee_preset_name})", knee_peak, knee_cont, knee_rpm,
-     budget['continuous_required']['knee_nm'], joint_speed_est.get('peak_knee_rad_s', 2.0))
-]:
-    omega_nl = rpm * 2 * np.pi / 60
-    speeds = np.linspace(0, omega_nl, 100)
-    torques = peak * (1 - speeds / omega_nl)
-    ax.fill_between(speeds, 0, np.minimum(torques, cont), alpha=0.2, color='green', label='Continuous region')
-    ax.fill_between(speeds, cont, torques, where=torques > cont, alpha=0.15, color='orange', label='Peak/intermittent')
-    ax.plot(speeds, torques, 'b-', linewidth=2, label='T-ω curve')
-    ax.axhline(y=cont, color='green', linestyle='--', alpha=0.6, label=f'Continuous: {cont:.2f} Nm')
-    ax.plot(req_s, req_t, 'r*', markersize=15, label=f'Operating point')
-    ax.set_xlabel('Joint speed (rad/s)')
-    ax.set_ylabel('Torque (Nm)')
-    ax.set_title(label)
-    ax.legend(fontsize=7)
-    ax.grid(True, alpha=0.3)
-fig_ts.tight_layout()
-st.pyplot(fig_ts, use_container_width=True)
+# =========================================================================================
+# TAB 4: MASS, POWER & OPTIMIZERS
+# =========================================================================================
+with tab_power_opt:
+    st.subheader("🔋 Mass Sizing, Battery Sizing & Leg Optimizations")
+    
+    # Layout splits
+    mcol1, mcol2 = st.columns([1, 1.2])
+    with mcol1:
+        st.markdown("#### ⚖️ Mass Component Breakdown")
+        
+        # Interactive number inputs bound to session state keys
+        _frame_mass_ui = st.number_input(
+            "Frame/chassis mass (kg)", 0.01, 20.0,
+            float(st.session_state["mass_frame"]), 0.01,
+            key="mass_frame_input_tab"
+        )
+        st.session_state["mass_frame"] = _frame_mass_ui
+        
+        _links_mass_ui = st.number_input(
+            "All links mass (kg, total 4 legs)", 0.01, 20.0,
+            float(st.session_state["mass_links"]), 0.01,
+            key="mass_links_input_tab"
+        )
+        st.session_state["mass_links"] = _links_mass_ui
+        
+        _battery_mass_ui = st.number_input(
+            "Battery mass (kg)", 0.01, 10.0,
+            float(st.session_state["mass_battery"]), 0.01,
+            key="mass_battery_input_tab"
+        )
+        st.session_state["mass_battery"] = _battery_mass_ui
+        
+        # Synchronized payload input
+        _payload_mass_ui = st.number_input(
+            "Payload mass (kg)", 0.0, 50.0,
+            float(st.session_state["mass_payload"]), 0.01,
+            key="mass_payload_input_tab"
+        )
+        st.session_state["mass_payload"] = _payload_mass_ui
+        
+        _payload_x_ui = st.number_input(
+            "Payload fore/aft offset (mm)", -500.0, 500.0,
+            float(st.session_state["mass_payload_x"]), 1.0,
+            key="mass_payload_x_input_tab"
+        )
+        st.session_state["mass_payload_x"] = _payload_x_ui
 
-# ---- Dynamic test cases ------------------------------------------------
-st.divider()
-st.subheader("Dynamic test cases")
-TESTS = {"Standing": (4, 0.0, 1.0), "Crouching": (4, .5, 1.1), "Walking": (3, 1.0, 1.3), "Trotting": (2, 2.0, 1.7), "Acceleration": (2, 4.0, 1.5), "Stopping": (2, 4.0, 1.5), "Slope standing": (3, 1.5, 1.2), "One-leg disturbance": (3, 3.0, 1.8), "Landing / impact": (2, 3.0, 2.5)}
-rows = []
-for name, (legs, accel, impact) in TESTS.items():
-    test = joint_torque_budget(hip_flexion=q_hip, knee_flexion=q_knee, hip_abduction=q_ab, hip_offset=derived["l1"], thigh_length=thigh, shank_length=shank, total_mass_kg=robot_mass, payload_kg=payload_mass, thigh_mass_kg=thigh_mass, shank_mass_kg=shank_mass, thigh_com_frac=thigh_com, shank_com_frac=shank_com, legs_in_stance=legs, dynamic_accel_mps2=accel, impact_factor=impact, transmission_efficiency=efficiency, safety_factor=safety_factor)
-    rows.append({"Test": name, "Stance legs": legs, "Hip peak (Nm)": round(test["peak_required"]["hip_nm"],2), "Knee peak (Nm)": round(test["peak_required"]["knee_nm"],2)})
-st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        st.markdown("**Fixed Allowances**")
+        st.caption(f"ESP32 Controller: {esp32_mass*1000:.0f} g | PCB PDB: {pcb_mass*1000:.0f} g")
+        st.caption(f"Sensors: {sensor_mass*1000:.0f} g | Wiring: {wiring_mass*1000:.0f} g | Fasteners: {fastener_mass*1000:.0f} g")
 
-# ---- Smart Motor-Aware Leg Proportion Optimizer -----------------------------------
-st.divider()
-st.subheader("Smart Motor-Aware Leg Proportion Optimizer")
-st.caption("Optimizes thigh/shank ratio to balance torque load between hip and knee joints for your selected motors.")
+    with mcol2:
+        st.markdown("#### 📊 Mass Distribution Chart")
+        
+        # Calculate totals
+        _components_dict = {
+            "Motors": motor_mass_total,
+            "Battery": _battery_mass_ui,
+            "Frame": _frame_mass_ui,
+            "Links (4 legs)": _links_mass_ui,
+            "Payload": _payload_mass_ui,
+            "ESP32": esp32_mass,
+            "PCB": pcb_mass,
+            "Sensors": sensor_mass,
+            "Wiring": wiring_mass,
+            "Fasteners": fastener_mass,
+        }
+        _total_mass_calc = sum(_components_dict.values())
+        
+        fig_pie, ax_pie = plt.subplots(figsize=(6, 4))
+        labels = [f"{k} ({v*1000:.0f}g)" for k, v in _components_dict.items() if v > 0.001]
+        sizes = [v for v in _components_dict.values() if v > 0.001]
+        colors = plt.cm.Set3(np.linspace(0, 1, len(sizes)))
+        wedges, texts, autotexts = ax_pie.pie(sizes, labels=labels, colors=colors, autopct='%1.0f%%', startangle=140)
+        ax_pie.set_title("Chassis Mass Distribution", fontsize=10)
+        st.pyplot(fig_pie, use_container_width=True)
+        
+        st.metric("Total System Mass (with Payload)", f"{_total_mass_calc:.3f} kg ({_total_mass_calc*1000:.0f} g)")
+        st.metric("Robot Dry Mass", f"{(_total_mass_calc - _payload_mass_ui):.3f} kg")
 
-# Current utilization
-hip_util = budget['peak_required']['hip_nm'] / hip_peak * 100 if hip_peak > 0 else 999
-knee_util = budget['peak_required']['knee_nm'] / knee_peak * 100 if knee_peak > 0 else 999
+    st.divider()
 
-util_col1, util_col2, util_col3 = st.columns(3)
-util_col1.metric("Current hip utilization", f"{hip_util:.0f}%",
-                  delta=f"{'OK' if hip_util < 100 else 'OVERLOADED'}")
-util_col2.metric("Current knee utilization", f"{knee_util:.0f}%",
-                  delta=f"{'OK' if knee_util < 100 else 'OVERLOADED'}")
-util_col3.metric("Current femur fraction", f"{derived.get('femur_fraction', 0.52):.0%}")
+    # Smart battery calculator
+    st.markdown("#### 🔋 Smart Servo Power & Battery Recommender")
+    pcol1, pcol2 = st.columns(2)
+    with pcol1:
+        target_runtime_min = st.slider("Desired walking runtime (minutes)", 5, 120, 20, 5, key="runtime_slider_tab")
+        battery_type = st.selectbox(
+            "Battery chemistry preference selection",
+            ["LiPo (Lithium Polymer) — High performance, light", "Li-ion 18650 — Good runtime, standard", "NiMH / External Power Supply"],
+            index=0, key="chem_select_tab"
+        )
+    with pcol2:
+        target_volts = max(hip_volts, knee_volts)
+        # Calculate Dual Motor Battery Requirements
+        if dof_total == 8:
+            num_hip, num_knee = 4, 4
+        else:
+            num_hip, num_knee = 8, 4
+        total_avg_current = (num_hip * 0.5 * hip_avg_curr) + (num_knee * 0.5 * knee_avg_curr) + 0.35
+        total_peak_current = (num_hip * hip_curr) + (num_knee * knee_curr) + 0.35
+        req_capacity_mah = int(np.ceil((total_avg_current * (target_runtime_min / 60.0) / 0.80) * 1000 / 100) * 100)
+        req_c_rating = int(np.ceil(total_peak_current / (req_capacity_mah / 1000.0)))
+        lipo_cells = "2S (7.4V)" if target_volts <= 7.4 else ("3S (11.1V)" if target_volts <= 11.1 else "4S (14.8V)")
+        
+        st.write(f"• Peak Current Demand: **{total_peak_current:.1f} A**")
+        st.write(f"• Avg Walking Current: **{total_avg_current:.1f} A**")
 
-if optimize_leg_proportions_for_motors is not None:
-    with st.expander("🔧 Run Dual-Objective Leg Optimizer (balances hip + knee torque)", expanded=False):
-        st.caption("Searches for the thigh/shank split that gives both joints their BEST margin simultaneously, instead of just minimizing knee torque.")
-        if st.button("🚀 Optimize leg proportions for selected motors"):
-            opt_result = optimize_leg_proportions_for_motors(
-                standing_height, robot_mass, payload_mass,
-                thigh_mass, shank_mass, stance_legs,
-                dynamic_accel, impact_factor, efficiency, safety_factor,
-                has_abad, derived["l1"],
-                hip_peak, hip_cont, knee_peak, knee_cont
-            )
-            st.success(f"✅ **Optimized proportions**: Thigh = **{opt_result['thigh_length_m']*MM:.1f} mm** "
-                       f"({opt_result['femur_fraction']:.0%}), Shank = **{opt_result['shank_length_m']*MM:.1f} mm** "
-                       f"({1-opt_result['femur_fraction']:.0%})")
-            opt_c1, opt_c2, opt_c3 = st.columns(3)
-            opt_c1.metric("Optimized hip utilization", f"{opt_result['hip_utilization_pct']:.0f}%")
-            opt_c2.metric("Optimized knee utilization", f"{opt_result['knee_utilization_pct']:.0f}%")
-            opt_c3.metric("Improvement", f"{opt_result.get('improvement_pct', 0):.1f}%")
+    # Battery recommendations
+    bp1, bp2, bp3 = st.columns(3)
+    bp1.metric("Recommended Battery Voltage", f"{target_volts:.1f} V ({lipo_cells})")
+    bp2.metric("Min Capacity Required", f"{req_capacity_mah} mAh")
+    bp3.metric("Min C-Rating Required", f"{req_c_rating}C or higher")
+    st.info(f"💡 **Power Recommendation**: Buy a **{lipo_cells} {req_capacity_mah} mAh LiPo Battery with at least {req_c_rating}C discharge rating**.")
 
-            # Visual comparison bar chart
-            fig_opt, ax_opt = plt.subplots(figsize=(8, 3))
-            x_labels = ['Hip', 'Knee']
-            current_vals = [hip_util, knee_util]
-            optimized_vals = [opt_result['hip_utilization_pct'], opt_result['knee_utilization_pct']]
-            x = np.arange(len(x_labels))
-            w = 0.35
-            ax_opt.bar(x - w/2, current_vals, w, label='Current', color='#ff7043', alpha=0.8)
-            ax_opt.bar(x + w/2, optimized_vals, w, label='Optimized', color='#66bb6a', alpha=0.8)
-            ax_opt.axhline(y=100, color='red', linestyle='--', label='100% limit', alpha=0.7)
-            ax_opt.set_ylabel('Motor utilization (%)')
-            ax_opt.set_title('Current vs Optimized Torque Utilization')
-            ax_opt.set_xticks(x)
-            ax_opt.set_xticklabels(x_labels)
-            ax_opt.legend()
-            ax_opt.grid(True, alpha=0.3, axis='y')
-            fig_opt.tight_layout()
-            st.pyplot(fig_opt, use_container_width=True)
+    st.divider()
 
-if suggest_cheaper_motor_combination is not None:
-    with st.expander("💰 Cost-Saving Motor Suggestions (find cheaper motor combos)", expanded=False):
-        st.caption("Searches for cheaper motor combinations that still pass torque requirements, possibly with adjusted leg proportions.")
-        if st.button("🔍 Find cheaper motor combinations"):
-            suggestions = suggest_cheaper_motor_combination(
-                standing_height, robot_mass, payload_mass,
-                thigh_mass, shank_mass, stance_legs,
-                dynamic_accel, impact_factor, efficiency, safety_factor,
-                has_abad, derived["l1"],
-                hip_preset_name, knee_preset_name, dof_total
-            )
-            if suggestions:
-                st.success(f"Found **{len(suggestions)}** cheaper motor combination(s)!")
-                cost_rows = []
-                for s in suggestions[:5]:  # Show top 5
-                    cost_rows.append({
-                        "Hip Motor": s['hip_motor'],
-                        "Knee Motor": s['knee_motor'],
-                        "Femur Fraction": f"{s['femur_fraction']:.0%}",
-                        "Total Motor Cost": f"₹{s['total_motor_cost']:,}",
-                        "Savings": f"₹{s['cost_savings']:,}",
-                        "Hip Margin": f"{s['hip_margin_pct']:.0f}%",
-                        "Knee Margin": f"{s['knee_margin_pct']:.0f}%"
-                    })
-                st.dataframe(pd.DataFrame(cost_rows), use_container_width=True, hide_index=True)
-            else:
-                st.info("No cheaper motor combination found that meets torque requirements. Your current selection is already cost-optimal for this design.")
-# ---- Mass breakdown (at the end of the page) ----------------------------------------
-st.divider()
-st.subheader("Mass breakdown")
-ms1, ms2, ms3, ms4 = st.columns(4)
-with ms1:
-    _motor_mass = st.number_input("Motor/servo mass (kg total all motors)", 0.005, 10.0,
-                                   float(st.session_state.get("mass_motor", preset_motor_mass_total)),
-                                   0.01, key="mass_motor_input")
-    st.session_state["mass_motor"] = _motor_mass
-    _battery_mass = st.number_input("Battery mass (kg)", 0.01, 10.0,
-                                     float(st.session_state.get("mass_battery", 0.20)),
-                                     0.01, key="mass_battery_input")
-    st.session_state["mass_battery"] = _battery_mass
-with ms2:
-    _frame_mass = st.number_input("Frame/chassis mass (kg)", 0.01, 20.0,
-                                   float(st.session_state.get("mass_frame", 0.25)),
-                                   0.01, key="mass_frame_input")
-    st.session_state["mass_frame"] = _frame_mass
-    _links_mass = st.number_input("All links mass (kg, total 4 legs)", 0.01, 20.0,
-                                   float(st.session_state.get("mass_links", 0.15)),
-                                   0.01, key="mass_links_input")
-    st.session_state["mass_links"] = _links_mass
-with ms3:
-    _payload_mass = st.number_input("Payload mass (kg)", 0.0, 50.0,
-                                     float(st.session_state["mass_payload"]), 0.01,
-                                     key="mass_payload_input",
-                                     help="Extra weight carried on top of the robot. Synchronized with sidebar input.")
-    st.session_state["mass_payload"] = _payload_mass
-    _payload_x = st.number_input("Payload fore/aft offset (mm)", -500.0, 500.0,
-                                  float(st.session_state.get("mass_payload_x", 0.0)),
-                                  1.0, key="mass_payload_x_input")
-    st.session_state["mass_payload_x"] = _payload_x
-with ms4:
-    st.markdown("**Fixed allowances**")
-    st.caption(f"ESP32/controller: {esp32_mass*1000:.0f} g")
-    st.caption(f"PCB: {pcb_mass*1000:.0f} g")
-    st.caption(f"Sensors: {sensor_mass*1000:.0f} g")
-    st.caption(f"Wiring: {wiring_mass*1000:.0f} g")
-    st.caption(f"Fasteners: {fastener_mass*1000:.0f} g")
+    # Leg proportion optimizer
+    st.markdown("#### ⚙️ Motor-Aware Leg Geometry Optimizer")
+    st.caption("Searches for link length distributions that maximize torque margin on both joints simultaneously.")
+    
+    hip_util = budget['peak_required']['hip_nm'] / hip_peak * 100 if hip_peak > 0 else 999
+    knee_util = budget['peak_required']['knee_nm'] / knee_peak * 100 if knee_peak > 0 else 999
+    
+    uc1, uc2 = st.columns(2)
+    uc1.metric("Hip Servo Utilization", f"{hip_util:.0f}%", delta=f"{'OK' if hip_util < 100 else 'OVERLOADED'}")
+    uc2.metric("Knee Servo Utilization", f"{knee_util:.0f}%", delta=f"{'OK' if knee_util < 100 else 'OVERLOADED'}")
 
-_components = {
-    "Motors": _motor_mass,
-    "Battery": _battery_mass,
-    "Frame": _frame_mass,
-    "Links (4 legs)": _links_mass,
-    "Payload": _payload_mass,
-    "ESP32": esp32_mass,
-    "PCB": pcb_mass,
-    "Sensors": sensor_mass,
-    "Wiring": wiring_mass,
-    "Fasteners": fastener_mass,
-}
-_total = sum(_components.values())
+    if optimize_leg_proportions_for_motors is not None:
+        with st.expander("🔧 Run Dual-Objective Leg Proportion Optimizer"):
+            if st.button("🚀 Optimize leg proportions for selected motors"):
+                opt_result = optimize_leg_proportions_for_motors(
+                    standing_height, _total_mass_calc, _payload_mass_ui,
+                    thigh_mass, shank_mass, stance_legs,
+                    dynamic_accel, impact_factor, efficiency, safety_factor,
+                    has_abad, derived["l1"],
+                    hip_peak, hip_cont, knee_peak, knee_cont
+                )
+                st.success(f"✅ **Optimized split**: Thigh = **{opt_result['thigh_length_m']*MM:.1f} mm** ({opt_result['femur_fraction']:.0%}), Shank = **{opt_result['shank_length_m']*MM:.1f} mm** ({1-opt_result['femur_fraction']:.0%})")
+                
+                opt_c1, opt_c2, opt_c3 = st.columns(3)
+                opt_c1.metric("Optimized Hip Utilization", f"{opt_result['hip_utilization_pct']:.0f}%")
+                opt_c2.metric("Optimized Knee Utilization", f"{opt_result['knee_utilization_pct']:.0f}%")
+                opt_c3.metric("Torque-Margin Improvement", f"{opt_result.get('improvement_pct', 0):.1f}%")
 
-pie_col, summary_col = st.columns([1.5, 1])
-with pie_col:
-    fig, ax = plt.subplots(figsize=(6, 4))
-    labels = [f"{k} ({v*1000:.0f}g)" for k, v in _components.items() if v > 0.001]
-    sizes = [v for v in _components.values() if v > 0.001]
-    colors = plt.cm.Set3(np.linspace(0, 1, len(sizes)))
-    wedges, texts, autotexts = ax.pie(sizes, labels=labels, colors=colors, autopct='%1.0f%%',
-                                       startangle=140, textprops={'fontsize': 8})
-    for t in autotexts:
-        t.set_fontsize(7)
-    ax.set_title("Mass distribution", fontsize=10)
-    st.pyplot(fig, use_container_width=True)
-with summary_col:
-    st.metric("Total system mass", f"{_total:.3f} kg ({_total*1000:.0f} g)")
-    st.metric("Robot mass (no payload)", f"{(_total - _payload_mass):.3f} kg")
-    st.metric("Mass per leg", f"{((_motor_mass / 4) + _links_mass/4)*1000:.0f} g")
+    if suggest_cheaper_motor_combination is not None:
+        with st.expander("💰 Cost-Saving Motor Downsizing Suggestions"):
+            if st.button("🔍 Find cheaper motor combinations"):
+                suggestions = suggest_cheaper_motor_combination(
+                    standing_height, _total_mass_calc, _payload_mass_ui,
+                    thigh_mass, shank_mass, stance_legs,
+                    dynamic_accel, impact_factor, efficiency, safety_factor,
+                    has_abad, derived["l1"],
+                    hip_preset_name, knee_preset_name, dof_total
+                )
+                if suggestions:
+                    st.success(f"Found **{len(suggestions)}** cheaper motor combination(s) that meet torque requirements!")
+                    cost_rows = []
+                    for s in suggestions[:5]:
+                        cost_rows.append({
+                            "Hip Motor": s['hip_motor'],
+                            "Knee Motor": s['knee_motor'],
+                            "Femur Fraction": f"{s['femur_fraction']:.0%}",
+                            "Total Motor Cost": f"₹{s['total_motor_cost']:,}",
+                            "Savings": f"₹{s['cost_savings']:,}",
+                            "Hip Margin": f"{s['hip_margin_pct']:.0f}%",
+                            "Knee Margin": f"{s['knee_margin_pct']:.0f}%"
+                        })
+                    st.dataframe(pd.DataFrame(cost_rows), use_container_width=True, hide_index=True)
+                else:
+                    st.info("No cheaper motor combination found that meets torque requirements. Your current selection is already cost-optimal.")
 
-# ---- BUILD DATA FOR PDF GENERATION & RENDER DOWNLOAD BUTTON -----------------------
+# =========================================================================================
+# PDF BUILDER DATA DICT AND DOWNLOAD BUTTON
+# =========================================================================================
 pdf_data = {
     'dof_total': dof_total,
     'standing_height_mm': standing_height * MM,
-    'total_mass_kg': _total,
+    'total_mass_kg': _total_mass_calc,
     'terrain': terrain,
     'motor_mode_name': motor_mode_name,
     'motor_mode': motor_mode,
@@ -1085,7 +989,7 @@ pdf_data = {
         'total_peak_current': total_peak_current,
         'target_runtime_min': target_runtime_min
     },
-    'mass_components': _components
+    'mass_components': _components_dict
 }
 
 try:
@@ -1095,7 +999,7 @@ try:
         data=pdf_bytes,
         file_name=f"Quadruped_Robot_Engineering_Dossier_{dof_total}DOF.pdf",
         mime="application/pdf",
-        help="Click to generate and download a complete multi-page PDF engineering calculation dossier to present to your professor, team, or supervisor!"
+        help="Click to generate and download a complete A4 PDF engineering calculation dossier to present your project!"
     )
 except Exception as pdf_err:
     pdf_button_container.warning(f"📄 PDF Exporter: {pdf_err}")
